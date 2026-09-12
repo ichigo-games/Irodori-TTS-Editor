@@ -1,3 +1,7 @@
+> このアプリの呼び名は **彩エディター** です（技術名: Irodori-TTS-Editor）。
+> 現行の仕様は [仕様書](docs/SPECIFICATION.md)、Codex・Claude共通の作業ルールは [開発ガイド](docs/DEVELOPMENT.md) を参照してください。
+> 以下には過去の機能追加時の説明・検証記録も含まれます。現行仕様との相違は仕様書を参照してください。
+
 # Irodori-TTS-Editor
 
 Windowsローカル専用のYouTubeナレーション制作エディタ。1行＝1セリフの台本を一括生成し、気になる行だけ読み・話速・Seedを直して再生成できます。
