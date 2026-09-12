@@ -23,6 +23,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.tts import IrodoriEngine
 from app.audio_output import output_audio
+from app.post_processing import process_audio
 from app.preprocessing import apply_dictionary, normalize_for_tts
 from app.subtitle_formatter import format_subtitle
 from app.project_files import write_project_file, read_project_file
@@ -107,12 +108,19 @@ def decode_csv_script(data):
 
 
 
+DEFAULT_POST_PROCESSING = {
+    'enabled': False, 'eq_enabled': True, 'eq_preset': 'soften',
+    'frequency': 3500.0, 'gain_db': -1.5, 'q': 1.0,
+    'peak_enabled': True, 'peak_dbfs': -1.0,
+}
+
 lock = threading.RLock()
 engine = IrodoriEngine()
 settings = read_json(DATA / 'settings.json', {'reference': '', 'duration_scale': 0.85})
 settings.setdefault('normalize_numbers', True)
 settings.setdefault('wrap_subtitles', True)
 settings.setdefault('masters', [])
+settings.setdefault('post_processing', dict(DEFAULT_POST_PROCESSING))
 dictionary = read_json(DATA / 'dictionaries' / 'reading.json', [])
 job = {'running': False, 'done': 0, 'total': 0, 'errors': 0, 'current': None, 'project': None}
 app = FastAPI(title='Irodori TTS Editor')
@@ -186,6 +194,26 @@ class Settings(BaseModel):
     normalize_numbers: bool = True
     reference: str
     duration_scale: float = Field(0.85, ge=0.25, le=4)
+
+
+class PostProcessingSettings(BaseModel):
+    """VoiceDesign/captionとは独立した、生成後WAVへの非破壊EQ・Peak補正の設定。"""
+    enabled: bool = False
+    eq_enabled: bool = True
+    eq_preset: str = 'soften'
+    frequency: float = Field(3500.0, ge=20, le=20000)
+    gain_db: float = Field(-1.5, ge=-12, le=12)
+    q: float = Field(1.0, ge=0.1, le=10)
+    peak_enabled: bool = True
+    peak_dbfs: float = Field(-1.0, ge=-24, le=0)
+
+
+@app.put('/api/settings/post_processing')
+def save_post_processing(value: PostProcessingSettings):
+    with lock:
+        settings['post_processing'] = value.model_dump()
+        atomic_json(DATA / 'settings.json', settings)
+        return settings
 
 
 class Master(BaseModel):
@@ -736,14 +764,32 @@ def stop_generation(pid: str):
         return copy.deepcopy(job)
 
 
+def resolve_audio_source(pid, row, variant='auto'):
+    """Raw WAV, forced Post Processing, or (default) whatever the saved setting implies.
+
+    Used by both the preview endpoint and export(), so "試聴した音" and "最終出力" are
+    guaranteed to match whenever variant='auto' is used in both places.
+    """
+    raw = project_path(pid).parent / row['wav']
+    if variant == 'raw':
+        return raw
+    pp = settings.get('post_processing', DEFAULT_POST_PROCESSING)
+    if variant == 'processed' or pp.get('enabled'):
+        return process_audio(raw, pp)
+    return raw
+
+
 @app.get('/api/projects/{pid}/audio/{rid}')
-def audio(pid: str, rid: int):
+def audio(pid: str, rid: int, variant: str = 'auto'):
     with lock:
+        if variant not in ('auto', 'raw', 'processed'):
+            raise HTTPException(400, '不正なvariantです')
         p = load_project(pid)
         row = next((r for r in p['rows'] if r['id'] == rid), None)
         if not row or not row['wav']:
             raise HTTPException(404, '音声がありません')
-        return FileResponse(output_audio(project_path(pid).parent / row['wav'], row.get('pause_ms', 0)), media_type='audio/wav')
+        source = resolve_audio_source(pid, row, variant)
+        return FileResponse(output_audio(source, row.get('pause_ms', 0)), media_type='audio/wav')
 
 
 @app.post('/api/projects/{pid}/export')
@@ -780,7 +826,7 @@ def export(pid: str, value: Export):
                 if index:
                     time.sleep(1.0)
                 subtitle = format_subtitle(row['subtitle_text']) if settings['wrap_subtitles'] else row['subtitle_text']
-                source = output_audio(project_path(pid).parent / row['wav'], row.get('pause_ms', 0))
+                source = output_audio(resolve_audio_source(pid, row, 'auto'), row.get('pause_ms', 0))
                 publish_export_pair(source, folder, stem, subtitle)
         except OSError as exc:
             raise HTTPException(400, f'出力先に書き込めません：{folder}。書き込み権限と空き容量を確認してください。制限付き環境から起動している場合は、通常のPowerShellから start.ps1 で起動してください。途中のファイルがある場合、このフォルダの出力は未完了です。詳細：{exc}') from exc
