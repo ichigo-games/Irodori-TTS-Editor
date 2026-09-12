@@ -1,0 +1,9 @@
+[project]
+name = "irodori-tts-editor"
+version = "0.1.0"
+description = "Local narration editor using an external Irodori-TTS installation"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.uv]
+package = false

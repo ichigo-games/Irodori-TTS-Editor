@@ -1,0 +1,34 @@
+{
+  "project": "eff4f32f636d41acaa71b515f64f264e",
+  "export": "E:\\Irodori-TTS-Editor\\outputs\\ymm4_20260906_190952_ea681e",
+  "subtitle_matches": true,
+  "audio": [
+    {
+      "file": "001.wav",
+      "seconds": 3.2,
+      "sample_rate": 48000
+    },
+    {
+      "file": "002.wav",
+      "seconds": 3.52,
+      "sample_rate": 48000
+    },
+    {
+      "file": "003.wav",
+      "seconds": 2.52,
+      "sample_rate": 48000
+    }
+  ],
+  "automated_tests": 4,
+  "web_checks": [
+    "txt import",
+    "single generation",
+    "selected generation",
+    "missing generation",
+    "bulk duration",
+    "dictionary preview and generation",
+    "playback",
+    "export",
+    "restart restore"
+  ]
+}
