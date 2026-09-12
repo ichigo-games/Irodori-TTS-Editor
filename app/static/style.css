@@ -46,7 +46,7 @@ main{flex:1;min-height:0;display:flex;flex-direction:column;padding:10px 16px}
 #panelEditor{flex:1;min-height:0;display:flex;flex-direction:column;gap:5px}
 #panelEditor>.toolbar,#panelEditor>.progress,#panelEditor>.export{flex:none;margin:0;padding:0;gap:7px}
 #panelEditor>.tablewrap{flex:1;min-height:0;max-height:none}
-#panelDictionary,#panelSettings{flex:1;min-height:0;overflow:auto}
+#panelDictionary,#panelSettings,#panelBulk{flex:1;min-height:0;overflow:auto}
 .command-bar{flex-wrap:nowrap;overflow-x:auto;padding-bottom:2px!important}
 .command-bar>label{flex:1 1 260px;min-width:160px;max-width:none}
 .command-bar #output{min-width:70px;width:100%}
@@ -60,3 +60,8 @@ main{flex:1;min-height:0;display:flex;flex-direction:column;padding:10px 16px}
 #exportInfo{flex:none;margin:0;max-height:50px;overflow:auto}
 #projectSaved{display:none}
 th{padding:8px}td{padding:6px 8px}
+
+#rows .drag-handle{cursor:grab;min-width:26px}#rows .drag-handle:active{cursor:grabbing}
+#rows tr.dragging-row{opacity:.55}#rows tr.drop-before td{box-shadow:inset 0 3px #65c5ba}#rows tr.drop-after td{box-shadow:inset 0 -3px #65c5ba}
+
+.master-entry{flex-wrap:wrap;border-bottom:1px solid #334051}.master-entry>div{flex-basis:100%;min-width:0}.master-entry small{display:block;overflow-wrap:anywhere;margin-top:4px}

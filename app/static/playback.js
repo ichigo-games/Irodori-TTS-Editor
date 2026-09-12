@@ -9,6 +9,8 @@ class PlaybackQueue {
     this.index = -1;
     this.version = 0;
     this.running = false;
+    this.waiting = false;
+    this.resolve = item => item;
     audio.addEventListener('ended', () => { if (this.running) this.next(); });
     audio.addEventListener('play', () => { if (this.items.length) this.setRunning(true); });
     audio.addEventListener('pause', () => { if (!audio.ended) this.setRunning(false); });
@@ -34,12 +36,27 @@ class PlaybackQueue {
       this.report('連続再生が完了しました');
       return;
     }
-    const item = this.items[this.index];
+    this.playCurrent();
+  }
+  playCurrent() {
+    const item = this.resolve(this.items[this.index]);
+    if (item === null) {
+      this.waiting = true;
+      this.setRunning(true);
+      this.report(`No.${this.items[this.index].id} の生成完了を待っています`);
+      return;
+    }
+    this.waiting = false;
+    if (!item) { this.next(); return; }
     this.audio.src = item.url;
     this.onCurrent(item.id);
     this.resume();
   }
+  refresh() {
+    if (this.waiting && this.running) this.playCurrent();
+  }
   resume() {
+    if (this.waiting) { this.setRunning(true); this.playCurrent(); return; }
     if (!this.items.length) return;
     if (this.audio.ended) { this.next(); return; }
     const item = this.items[this.index];
@@ -62,6 +79,7 @@ class PlaybackQueue {
   stop() {
     this.version++;
     this.items = [];
+    this.waiting = false;
     this.index = -1;
     this.setRunning(false);
     this.audio.pause();

@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import csv
 import io
 import json
@@ -7,6 +8,7 @@ import re
 import secrets
 import shutil
 import threading
+import time
 import uuid
 import subprocess
 import sys
@@ -74,9 +76,13 @@ def decode_csv_script(data):
                 continue
             if columns is None:
                 columns = [aliases.get(f.strip().casefold()) for f in fields]
-                if None in columns or columns.count('text') != 1 or columns.count('master') > 1 or columns.count('pause_ms') > 1:
+                if all(column is None for column in columns) and 1 <= len(fields) <= 3:
+                    # Headerless scripts use the fixed order: text, master, pause_ms.
+                    columns = ['text', 'master', 'pause_ms'][:len(fields)]
+                elif None in columns or columns.count('text') != 1 or columns.count('master') > 1 or columns.count('pause_ms') > 1:
                     raise HTTPException(400, 'CSVの先頭行は「セリフ,マスター」または「セリフ」にしてください（任意列: 末尾無音ms / 英語列: text,master,pause_ms）')
-                continue
+                else:
+                    continue
             if len(fields) > len(columns):
                 raise HTTPException(400, f'CSV {source}行目: 列が多すぎます。セリフ中のカンマはダブルクォートで囲んでください')
             values = dict(zip(columns, fields + [''] * (len(columns) - len(fields))))
@@ -85,7 +91,7 @@ def decode_csv_script(data):
             if name == '共通マスター':
                 name = ''
             if not text:
-                raise HTTPException(400, f'CSV {source}行目: セリフが空です')
+                continue
             if len(text) > 10000:
                 raise HTTPException(400, f'CSV {source}行目: セリフは10000文字以内にしてください')
             if name and name.casefold() not in masters:
@@ -200,7 +206,7 @@ def register_master(value: Master):
         mid = uuid.uuid4().hex
         target = DATA / 'voices' / f'{mid}.wav'
         shutil.copyfile(source, target)
-        settings['masters'].append(dict(id=mid, name=name, reference=str(target)))
+        settings['masters'].append(dict(id=mid, name=name, reference=str(target), original_name=source.name))
         atomic_json(DATA / 'settings.json', settings)
         return settings
 
@@ -218,8 +224,59 @@ def upload_master(file: UploadFile, name: str = Form(...)):
         target = DATA / 'voices' / f'{mid}.wav'
         with target.open('wb') as output:
             shutil.copyfileobj(file.file, output)
-        settings['masters'].append(dict(id=mid, name=name, reference=str(target)))
+        settings['masters'].append(dict(id=mid, name=name, reference=str(target), original_name=Path(file.filename.replace('\\', '/')).name))
         atomic_json(DATA / 'settings.json', settings)
+        return settings
+
+
+def master_usage(master):
+    projects = []
+    for path in (DATA / 'projects').glob('*/project.json'):
+        p = read_json(path, {})
+        count = sum(r.get('master_id') == master['id'] for r in p.get('rows', []))
+        if count:
+            projects.append({'name': p.get('name', path.parent.name), 'count': count})
+    return {'projects': projects, 'common': settings.get('reference') == master['reference']}
+
+
+@app.get('/api/masters')
+def list_masters():
+    with lock:
+        return [{**m, **master_usage(m), 'exists': Path(m['reference']).is_file()} for m in settings['masters']]
+
+
+class MasterName(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+
+
+@app.put('/api/masters/{mid}')
+def rename_master(mid: str, value: MasterName):
+    with lock:
+        idle()
+        master = next((m for m in settings['masters'] if m['id'] == mid), None)
+        if not master:
+            raise HTTPException(404, 'マスターがありません')
+        name = value.name.strip()
+        if not name or any(m['id'] != mid and m['name'].casefold() == name.casefold() for m in settings['masters']):
+            raise HTTPException(400, 'マスター名が空か、既に登録されています')
+        master['name'] = name
+        atomic_json(DATA / 'settings.json', settings)
+        return settings
+
+
+@app.delete('/api/masters/{mid}')
+def delete_master(mid: str):
+    with lock:
+        idle()
+        master = next((m for m in settings['masters'] if m['id'] == mid), None)
+        if not master:
+            raise HTTPException(404, 'マスターがありません')
+        usage = master_usage(master)
+        if usage['common'] or usage['projects']:
+            raise HTTPException(409, '使用中のマスターです。共通マスター・各プロジェクトの行を別のマスターに変更してから削除してください')
+        settings['masters'] = [m for m in settings['masters'] if m['id'] != mid]
+        atomic_json(DATA / 'settings.json', settings)
+        # Keep the WAV for saved archives and recovery; only remove the registration.
         return settings
 
 
@@ -263,14 +320,46 @@ def choose_path(kind, title, initial='', name='project.irodori'):
     if not dialog_lock.acquire(blocking=False):
         raise HTTPException(409, '開いている保存先ダイアログを先に閉じてください')
     try:
+        locations = read_json(DATA / 'dialog_locations.json', {})
+        key = kind + ':' + title
+        remembered = locations.get(key, '')
+        if remembered and Path(remembered).is_dir():
+            initial = remembered
         result = subprocess.run([sys.executable, '-B', '-X', 'utf8', '-m', 'app.dialogs'],
                                 input=json.dumps(dict(kind=kind, title=title, initialdir=initial, name=name)),
                                 capture_output=True, text=True, encoding='utf-8', cwd=ROOT)
         if result.returncode:
             raise HTTPException(400, 'Windowsダイアログを開けません。通常のPowerShellから起動してください。')
-        return json.loads(result.stdout)['path']
+        selected = json.loads(result.stdout)['path']
+        if selected:
+            locations[key] = str(Path(selected) if kind == 'folder' else Path(selected).parent)
+            atomic_json(DATA / 'dialog_locations.json', locations)
+        return selected
     finally:
         dialog_lock.release()
+
+
+@app.post('/api/dialog/script')
+def choose_script():
+    selected = choose_path('script', '台本を選択')
+    if not selected:
+        return {'cancelled': True}
+    with Path(selected).open('rb') as stream:
+        return create_project(UploadFile(filename=Path(selected).name, file=stream))
+
+
+@app.post('/api/dialog/voice')
+def choose_voice():
+    selected = choose_path('wav', '共通マスターのWAVを選択')
+    if not selected:
+        return {'cancelled': True}
+    with Path(selected).open('rb') as stream:
+        return upload_reference(UploadFile(filename=Path(selected).name, file=stream))
+
+
+@app.post('/api/dialog/master')
+def choose_master():
+    return {'path': choose_path('wav', '登録するマスターのWAVを選択')}
 
 
 @app.post('/api/dialog/output')
@@ -291,18 +380,30 @@ def open_project_file():
             p = read_project_file(selected, folder, lambda row: RowEdit.model_validate(row))
             for master in p.pop('masters', []):
                 old_id, old_ref = master['id'], master.pop('original_reference')
-                mid = uuid.uuid4().hex
-                base = master['name']
-                name, n = base, 2
-                while any(m['name'].casefold() == name.casefold() for m in settings['masters']):
-                    name = f'{base} ({n})'
-                    n += 1
-                settings['masters'].append(dict(id=mid, name=name, reference=master['reference']))
+                digest = hashlib.sha256(Path(master['reference']).read_bytes()).digest()
+                matches = [m for m in settings['masters'] if Path(m['reference']).is_file()
+                           and hashlib.sha256(Path(m['reference']).read_bytes()).digest() == digest]
+                existing = next((m for m in matches if m['id'] == old_id), None)
+                existing = existing or next((m for m in matches if m['name'] == master['name']), None)
+                existing = existing or next(iter(matches), None)
+                if existing:
+                    mid = existing['id']
+                    reference = existing['reference']
+                else:
+                    mid = uuid.uuid4().hex
+                    base = master['name']
+                    name, n = base, 2
+                    while any(m['name'].casefold() == name.casefold() for m in settings['masters']):
+                        name = f'{base} ({n})'
+                        n += 1
+                    reference = master['reference']
+                    settings['masters'].append(dict(id=mid, name=name, reference=reference,
+                                                   original_name=master.get('original_name')))
                 for row in p['rows']:
                     if row.get('master_id') == old_id:
                         row['master_id'] = mid
                         if row.get('reference') == old_ref:
-                            row['reference'] = master['reference']
+                            row['reference'] = reference
             atomic_json(DATA / 'settings.json', settings)
             p.update(id=pid, name=Path(selected).stem, project_file=selected)
             atomic_json(folder / 'project.json', p)
@@ -380,6 +481,8 @@ def save_settings(value: Settings):
         idle()
         if value.reference and not Path(value.reference).is_file():
             raise HTTPException(400, 'Reference Audioが見つかりません')
+        if value.reference != settings.get('reference'):
+            settings.pop('reference_original_name', None)
         settings.update(value.model_dump())
         atomic_json(DATA / 'settings.json', settings)
         invalidate_reference(settings['reference'])
@@ -396,6 +499,7 @@ def upload_reference(file: UploadFile):
         with path.open('wb') as f:
             shutil.copyfileobj(file.file, f)
         settings['reference'] = str(path)
+        settings['reference_original_name'] = Path(file.filename.replace('\\', '/')).name
         atomic_json(DATA / 'settings.json', settings)
         invalidate_reference(settings['reference'])
         return settings
@@ -516,10 +620,46 @@ def delete_row(pid: str, rid: int):
         return {'deleted': rid}
 
 
+class MoveRows(BaseModel):
+    ids: list[int] = Field(min_length=1)
+    before_id: int | None = None
+
+
+@app.post('/api/projects/{pid}/move-rows')
+def move_rows(pid: str, value: MoveRows):
+    with lock:
+        idle()
+        p = load_project(pid)
+        rows = p['rows']
+        ids = set(value.ids)
+        positions = [i for i, row in enumerate(rows) if row['id'] in ids]
+        if len(ids) != len(value.ids) or len(positions) != len(ids):
+            raise HTTPException(400, '移動する行が不正です')
+        if positions != list(range(positions[0], positions[-1] + 1)):
+            raise HTTPException(400, 'まとめて移動する行は連続して選択してください')
+        if value.before_id is not None and not any(r['id'] == value.before_id for r in rows):
+            raise HTTPException(400, '移動先の行がありません')
+        if value.before_id not in ids:
+            moving = [r for r in rows if r['id'] in ids]
+            remaining = [r for r in rows if r['id'] not in ids]
+            index = next((i for i, r in enumerate(remaining) if r['id'] == value.before_id), len(remaining))
+            rows = remaining[:index] + moving + remaining[index:]
+        selected = [i for i, row in enumerate(rows, 1) if row['id'] in ids]
+        for i, row in enumerate(rows, 1):
+            row['id'] = i
+            row['preview'] = prepare_text(row['speech_text'])
+        p['rows'] = rows
+        # Move the complete row; WAV paths and generation metadata stay unchanged.
+        atomic_json(project_path(pid), p)
+        return {'project': p, 'selected': selected}
+
+
 def run_job(pid, ids, seed_mode, reference, entries, normalize_numeric=True):
     try:
         for rid in ids:
             with lock:
+                if job.get('stop_requested'):
+                    break
                 p = load_project(pid)
                 row = p['rows'][rid - 1]
                 row.update(status='generating', error='')
@@ -557,6 +697,7 @@ def run_job(pid, ids, seed_mode, reference, entries, normalize_numeric=True):
                 with (project_path(pid).parent / 'generation.jsonl').open('a', encoding='utf-8') as f:
                     f.write(json.dumps({**snapshot, **result, 'effective_text': actual_text, 'attempted_seed': seed}, ensure_ascii=False) + '\n')
                 job['done'] += 1
+                job.setdefault('completed_ids', []).append(rid)
     except Exception as exc:
         with lock:
             job['fatal_error'] = repr(exc)
@@ -582,8 +723,16 @@ def generate(pid: str, value: Generate):
         invalid = [str(rid) for rid, ref in references.items() if not ref or not Path(ref).is_file()]
         if invalid:
             raise HTTPException(400, 'マスター音声が見つかりません。行: ' + ', '.join(invalid))
-        job.update(running=True, done=0, total=len(ids), errors=0, project=pid, fatal_error=None)
+        job.update(running=True, done=0, total=len(ids), errors=0, project=pid, fatal_error=None, stop_requested=False, ids=ids, completed_ids=[])
         threading.Thread(target=run_job, args=(pid, ids, value.seed_mode, references, copy.deepcopy(dictionary), settings['normalize_numbers']), daemon=True).start()
+        return copy.deepcopy(job)
+
+
+@app.post('/api/projects/{pid}/stop-generation')
+def stop_generation(pid: str):
+    with lock:
+        if job['running'] and job['project'] == pid:
+            job['stop_requested'] = True
         return copy.deepcopy(job)
 
 
@@ -627,17 +776,33 @@ def export(pid: str, value: Export):
                 if not any((folder / (stem + ext)).exists() for stem in stems for ext in ('.wav', '.txt')):
                     break
                 exported_at += timedelta(milliseconds=10)
-            for row, stem in zip(rows, stems):
-                with output_audio(project_path(pid).parent / row['wav'], row.get('pause_ms', 0)).open('rb') as source, (folder / (stem + '.wav')).open('xb') as target:
-                    shutil.copyfileobj(source, target)
+            for index, (row, stem) in enumerate(zip(rows, stems)):
+                if index:
+                    time.sleep(1.0)
                 subtitle = format_subtitle(row['subtitle_text']) if settings['wrap_subtitles'] else row['subtitle_text']
-                with (folder / (stem + '.txt')).open('x', encoding='utf-8-sig') as target:
-                    target.write(subtitle)
+                source = output_audio(project_path(pid).parent / row['wav'], row.get('pause_ms', 0))
+                publish_export_pair(source, folder, stem, subtitle)
         except OSError as exc:
             raise HTTPException(400, f'出力先に書き込めません：{folder}。書き込み権限と空き容量を確認してください。制限付き環境から起動している場合は、通常のPowerShellから start.ps1 で起動してください。途中のファイルがある場合、このフォルダの出力は未完了です。詳細：{exc}') from exc
         p.update(output_folder=str(folder), last_export=str(folder))
         atomic_json(project_path(pid), p)
         return {'folder': str(folder), 'count': len(rows), 'files': [stem + '.wav' for stem in stems]}
+
+
+def publish_export_pair(source, folder, stem, subtitle):
+    """Expose the finished WAV only after its subtitle exists (Windows rename is exclusive)."""
+    temporary = folder / ('.' + uuid.uuid4().hex + '.tmp')
+    try:
+        with source.open('rb') as audio, temporary.open('xb') as target:
+            shutil.copyfileobj(audio, target)
+        with (folder / (stem + '.txt')).open('x', encoding='utf-8-sig') as target:
+            target.write(subtitle)
+        destination = folder / (stem + '.wav')
+        if destination.exists():
+            raise FileExistsError(str(destination))
+        temporary.rename(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 app.mount('/', StaticFiles(directory=ROOT / 'app' / 'static', html=True), name='static')

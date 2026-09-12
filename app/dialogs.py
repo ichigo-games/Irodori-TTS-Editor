@@ -17,7 +17,9 @@ def main():
         if request['kind'] == 'folder':
             path = filedialog.askdirectory(**options)
         else:
-            options['filetypes'] = [('Irodoriプロジェクト', '*.irodori')]
+            options['filetypes'] = ([('台本', '*.txt *.csv')] if request['kind'] == 'script' else
+                                    [('WAV音声', '*.wav')] if request['kind'] == 'wav' else
+                                    [('Irodoriプロジェクト', '*.irodori')])
             if request['kind'] == 'save':
                 options.update(defaultextension='.irodori', initialfile=request.get('name', 'project.irodori'))
                 path = filedialog.asksaveasfilename(**options)

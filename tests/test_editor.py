@@ -45,6 +45,180 @@ class EditorTests(unittest.TestCase):
             time.sleep(.01)
         self.assertFalse(m.job['running'])
 
+    def test_dialog_locations_are_independent_and_persistent(self):
+        import json
+        from types import SimpleNamespace
+        first = Path(temp.name) / 'scripts'
+        second = Path(temp.name) / 'voices-source'
+        first.mkdir(exist_ok=True)
+        second.mkdir(exist_ok=True)
+        def result(path):
+            return SimpleNamespace(returncode=0, stdout=json.dumps({'path': str(path)}))
+        with patch.object(m.subprocess, 'run', return_value=result(first/'a.csv')):
+            m.choose_path('script', 'script-test')
+        with patch.object(m.subprocess, 'run', return_value=result(second/'a.wav')):
+            m.choose_path('wav', 'voice-test')
+        for kind, title, expected in [('script','script-test',first),('wav','voice-test',second)]:
+            with patch.object(m.subprocess, 'run', return_value=result('')) as run:
+                self.assertEqual(m.choose_path(kind,title), '')
+                self.assertEqual(json.loads(run.call_args.kwargs['input'])['initialdir'], str(expected))
+            stored = m.read_json(m.DATA/'dialog_locations.json', {})
+            self.assertEqual(stored[kind+':'+title], str(expected))
+
+    def test_native_script_selection(self):
+        source = Path(temp.name)/'native-script.csv'
+        source.write_text('セリフ\n台本テスト', encoding='utf-8')
+        with patch.object(m, 'choose_path', return_value=str(source)):
+            result = self.c.post('/api/dialog/script')
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json()['rows'][0]['speech_text'], '台本テスト')
+        with patch.object(m, 'choose_path', return_value=''):
+            self.assertTrue(self.c.post('/api/dialog/script').json()['cancelled'])
+
+    def test_reopen_reuses_master_by_content(self):
+        import copy
+        from app.project_files import write_project_file
+        unique = __import__('uuid').uuid4().hex
+        response = self.c.post('/api/masters/upload', data={'name': unique}, files={'file': ('voice.wav', unique.encode())})
+        master = response.json()['masters'][-1]
+        pid = self.create('テスト')
+        p = m.load_project(pid)
+        p['rows'][0].update(master_id=master['id'], reference=master['reference'])
+        p['masters'] = [copy.deepcopy(master)]
+        target = Path(temp.name) / (unique+'.irodori')
+        write_project_file(target, p, m.project_path(pid).parent)
+        count = len(m.settings['masters'])
+        with patch.object(m, 'choose_path', return_value=str(target)):
+            for _ in range(3):
+                response = self.c.post('/api/projects/open-file')
+                self.assertEqual(response.status_code, 200, response.text)
+                row = response.json()['project']['rows'][0]
+                self.assertEqual(row['master_id'], master['id'])
+                self.assertEqual(row['reference'], master['reference'])
+                self.assertEqual(len(m.settings['masters']), count)
+        # Reusing an ID/name must not reuse different audio.
+        Path(master['reference']).write_bytes(b'changed voice')
+        with patch.object(m, 'choose_path', return_value=str(target)):
+            response = self.c.post('/api/projects/open-file')
+        self.assertEqual(response.status_code, 200)
+        self.assertNotEqual(response.json()['project']['rows'][0]['master_id'], master['id'])
+        self.assertEqual(len(m.settings['masters']), count+1)
+
+    def test_headerless_csv(self):
+        for content, expected in [('こんにちは,共通マスター,350\n,共通マスター,350\n次の行,,500', [('こんにちは',350),('次の行',500)]),
+                                  ('こんにちは\n次の行', [('こんにちは',0),('次の行',0)]),
+                                  ('セリフ,マスター,末尾無音ms\nこんにちは,,350', [('こんにちは',350)])]:
+            result = self.c.post('/api/projects', files={'file': ('script.csv', content.encode('utf-8'))})
+            self.assertEqual(result.status_code, 200, result.text)
+            self.assertEqual([(r['speech_text'],r['pause_ms']) for r in result.json()['rows']], expected)
+
+    def test_master_management(self):
+        response = self.c.post('/api/masters/upload', data={'name': 'manage-test'}, files={'file': ('original.wav', b'test')})
+        master = response.json()['masters'][-1]
+        mid = master['id']
+        self.assertEqual(master['original_name'], 'original.wav')
+        self.assertEqual(self.c.put('/api/masters/'+mid, json={'name': 'renamed'}).status_code, 200)
+        pid = self.create('テスト')
+        p = m.load_project(pid)
+        p['rows'][0]['master_id'] = mid
+        m.atomic_json(m.project_path(pid), p)
+        usage = next(x for x in self.c.get('/api/masters').json() if x['id'] == mid)
+        self.assertEqual(usage['projects'][0]['count'], 1)
+        self.assertEqual(self.c.delete('/api/masters/'+mid).status_code, 409)
+        p['rows'][0]['master_id'] = None
+        m.atomic_json(m.project_path(pid), p)
+        self.assertEqual(self.c.delete('/api/masters/'+mid).status_code, 200)
+        self.assertTrue(Path(master['reference']).exists())
+        self.assertFalse(any(x['id'] == mid for x in self.c.get('/api/masters').json()))
+
+    def test_stop_after_current_and_resume(self):
+        pid = self.create('最初\n次')
+        entered, release = threading.Event(), threading.Event()
+        original = m.engine.generate
+        def blocking(*args):
+            entered.set()
+            if not release.wait(3):
+                raise RuntimeError('test timeout')
+            return original(*args)
+        m.engine.generate = blocking
+        try:
+            self.c.post(f'/api/projects/{pid}/generate', json={'mode': 'all'})
+            self.assertTrue(entered.wait(2))
+            response = self.c.post(f'/api/projects/{pid}/stop-generation')
+            self.assertTrue(response.json()['stop_requested'])
+            self.assertTrue(m.job['running'])
+        finally:
+            release.set()
+            self.wait()
+        rows = self.c.get(f'/api/projects/{pid}').json()['rows']
+        self.assertEqual([r['status'] for r in rows], ['generated', 'pending'])
+        self.assertEqual(m.job['done'], 1)
+        m.engine.generate = original
+        self.c.post(f'/api/projects/{pid}/generate', json={'mode': 'missing'})
+        self.wait()
+        self.assertFalse(m.job['stop_requested'])
+        self.assertEqual(len(m.engine.calls), 2)
+        self.assertEqual([r['status'] for r in self.c.get(f'/api/projects/{pid}').json()['rows']], ['generated', 'generated'])
+
+    def test_export_sequential_delay_and_finished_pair(self):
+        pid = self.create('最初\n次\n最後')
+        self.c.post(f'/api/projects/{pid}/generate', json={'mode': 'all'})
+        self.wait()
+        p = m.load_project(pid)
+        for row in p['rows']:
+            row['pause_ms'] = 0
+        m.atomic_json(m.project_path(pid), p)
+        folder = Path(temp.name) / ('paced-' + __import__('uuid').uuid4().hex)
+        events = []
+        original_rename = Path.rename
+        def rename(source, target):
+            self.assertEqual(source.suffix, '.tmp')
+            self.assertEqual(source.read_bytes(), b'RIFF-test')
+            self.assertTrue(target.with_suffix('.txt').exists())
+            self.assertFalse(target.exists())
+            events.append(target.name[:3])
+            return original_rename(source, target)
+        with patch.object(m.time, 'sleep', side_effect=lambda delay: events.append(delay)), patch.object(Path, 'rename', rename):
+            response = self.c.post(f'/api/projects/{pid}/export', json={'folder': str(folder)})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(events, ['001', 1.0, '002', 1.0, '003'])
+        self.assertEqual(len(list(folder.iterdir())), 6)
+        self.assertEqual([p.read_text('utf-8-sig') for p in sorted(folder.glob('*.txt'))], ['最初', '次', '最後'])
+
+    def test_move_rows_preserves_data_and_order(self):
+        pid = self.create('一行目\n二行目\n三行目\n四行目\n五行目')
+        original = self.c.get(f'/api/projects/{pid}').json()
+        for row in original['rows']:
+            row.update(pause_ms=row['id'] * 100, seed=row['id'], used_seed=row['id'],
+                       wav=f"audio/kept-{row['id']}.wav")
+        m.atomic_json(m.project_path(pid), original)
+        # Snapshot through the loader, which may mark missing audio as an error.
+        original = self.c.get(f'/api/projects/{pid}').json()
+        def move(ids, before):
+            result = self.c.post(f'/api/projects/{pid}/move-rows', json={'ids': ids, 'before_id': before})
+            self.assertEqual(result.status_code, 200)
+            return result.json()
+        result = move([2, 3], None)
+        self.assertEqual(result['selected'], [4, 5])
+        for current, old_index in zip(result['project']['rows'], [0, 3, 4, 1, 2]):
+            expected = dict(original['rows'][old_index], id=current['id'])
+            self.assertEqual(current, expected)
+        result = move([4, 5], 1)
+        self.assertEqual([r['speech_text'] for r in result['project']['rows']],
+                         ['二行目', '三行目', '一行目', '四行目', '五行目'])
+        unchanged = move([1, 2], 2)['project']['rows']
+        self.assertEqual(unchanged, result['project']['rows'])
+        self.assertEqual(move([1], 4)['selected'], [3])
+        for ids, before in [([1, 3], None), ([1, 1], None), ([99], None), ([1], 99)]:
+            self.assertEqual(self.c.post(f'/api/projects/{pid}/move-rows',
+                             json={'ids': ids, 'before_id': before}).status_code, 400)
+        m.job['running'] = True
+        try:
+            self.assertEqual(self.c.post(f'/api/projects/{pid}/move-rows',
+                             json={'ids': [1], 'before_id': None}).status_code, 409)
+        finally:
+            m.job['running'] = False
+
     def test_masters_mixed_generation_invalidation_and_portable_save(self):
         name = 'master_flat_' + __import__('uuid').uuid4().hex
         response = self.c.post('/api/masters/upload', data={'name': name}, files={'file': ('flat.wav', b'RIFF-flat')})

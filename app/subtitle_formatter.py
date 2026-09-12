@@ -57,30 +57,20 @@ def format_subtitle(text: str, preferred_min: int = PREFERRED_MIN,
         if before.endswith(('から', 'まで', 'より', 'ので', 'ため', 'なら', 'けど', 'けれど')) and _kind(text[i]) != 'hiragana':
             return 2
         # Require a plausible noun + particle boundary; do not split arbitrary kana words.
-        if i >= 2 and text[i - 1] in 'はがをにでともへ' and _kind(text[i - 2]) in ('kanji', 'katakana') and _kind(text[i]) != 'hiragana':
+        if i >= 2 and text[i - 1] in 'はがをにでともへの' and _kind(text[i - 2]) in ('kanji', 'katakana') and _kind(text[i]) != 'hiragana':
             return 2
         return 0
 
-    ranges = ((preferred_min, preferred_max),
-              (max(1, preferred_min - SEARCH_MARGIN), preferred_min - 1),
-              (preferred_max + 1, preferred_max + SEARCH_MARGIN))
-    cut = None
-    for low, high in ranges:
-        candidates = [(score(i), i) for i in range(low, min(high, len(text) - 1) + 1) if score(i)]
-        if candidates:
-            cut = max(candidates)[1]
-            break
-    if cut is None:
-        # A slightly earlier comma can be much better than cutting a word at 30.
-        candidates = [i for i in range(max(1, preferred_min - 2 * SEARCH_MARGIN), min(preferred_min, len(text)))
-                      if safe(i) and text[i - 1] in PUNCTUATION]
-        if candidates:
-            cut = candidates[-1]
-    if cut is None:
-        candidates = [i for i in range(1, len(text)) if safe(i)]
-        if not candidates:
-            return text
-        boundaries = [i for i in candidates if abs(i - preferred_max) <= SEARCH_MARGIN
-                      and _kind(text[i - 1]) != _kind(text[i])]
-        cut = min(boundaries or candidates, key=lambda i: (abs(i - preferred_max), -i))
+    # Balance the two lines first; prefer natural boundaries near the midpoint.
+    midpoint = len(text) / 2
+    candidates = [i for i in range(1, len(text)) if safe(i)]
+    if not candidates:
+        return text
+    nearby = [i for i in candidates if abs(i - midpoint) <= SEARCH_MARGIN]
+    natural = [i for i in nearby if score(i)]
+    if natural:
+        cut = min(natural, key=lambda i: (abs(i - midpoint), -score(i), -i))
+    else:
+        boundaries = [i for i in nearby if _kind(text[i - 1]) != _kind(text[i])]
+        cut = min(boundaries or candidates, key=lambda i: (abs(i - midpoint), -i))
     return text[:cut] + '\n' + text[cut:]

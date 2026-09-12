@@ -13,14 +13,26 @@ class SubtitleTests(unittest.TestCase):
         expected = 'このキャラは高い耐久力を持っているため、\n長期戦でも安定して活躍することができます'
         self.assertEqual(format_subtitle(source), expected)
         for position in (24, 28, 33):
-            text = 'あ' * (position - 1) + '、' + 'い' * 35
+            text = 'あ' * (position - 1) + '、' + 'い' * position
             self.assertEqual(format_subtitle(text).index('\n'), position)
 
     def test_particle_and_false_particle(self):
-        text = 'あ' * 23 + '攻撃力が' + '増加する効果を持っています'
-        self.assertEqual(format_subtitle(text), 'あ' * 23 + '攻撃力が\n増加する効果を持っています')
+        text = 'あ' * 17 + '攻撃力が' + '増加する効果を持っています'
+        self.assertEqual(format_subtitle(text), 'あ' * 17 + '攻撃力が\n増加する効果を持っています')
         text = 'あ' * 23 + 'クリティカル' + 'い' * 20
         self.assertIn('クリティカル', format_subtitle(text))
+
+    def test_balanced_wrap(self):
+        source = '味方のバフ個数を稼ぐには解除不可のバフではダメなので稼ぎにくい'
+        self.assertEqual(format_subtitle(source),
+                         '味方のバフ個数を稼ぐには解除不可の\nバフではダメなので稼ぎにくい')
+        for size in (31, 45, 70, 150):
+            first, second = format_subtitle('あ' * size).split('\n')
+            self.assertLessEqual(abs(len(first) - len(second)), 1)
+        # A distant comma must not outweigh balanced line lengths.
+        source = 'あ' * 23 + '、' + 'い' * 35
+        first, second = format_subtitle(source).split('\n')
+        self.assertLessEqual(abs(len(first) - len(second)), 1)
 
     def test_atomic_tokens(self):
         for token in ('3136','30%','3.5%','3,136','Lv240','Irodori-TTS','A.I.VOICE2'):
