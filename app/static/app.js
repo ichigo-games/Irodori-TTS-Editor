@@ -1,4 +1,7 @@
-function audioUrl(pid,row){return `/api/projects/${pid}/audio/${row.id}?v=${encodeURIComponent(row.generated_at||'')}&pause_ms=${row.pause_ms??0}`}
+function audioUrl(pid,row,variant='auto'){
+  const pp=variant==='raw'?'raw':JSON.stringify(state?.settings?.post_processing??{});
+  return `/api/projects/${pid}/audio/${row.id}?variant=${variant}&v=${encodeURIComponent(row.generated_at||'')}&pause_ms=${row.pause_ms??0}&pp=${encodeURIComponent(pp)}`;
+}
 const $=id=>document.getElementById(id);
 let project=null, state=null, chosen=new Set(), busy=false, saving=Promise.resolve(), pollBusy=false;
 const labels={pending:'未生成',generated:'生成済',generating:'生成中',error:'エラー',stale:'変更あり'};
@@ -85,7 +88,7 @@ const EQ_PRESETS={none:{frequency:3500,gain_db:0,q:1},soften:{frequency:3500,gai
 function updateEqPresetFields(){
   const preset=$('eqPreset').value;const fixed=EQ_PRESETS[preset];const custom=preset==='custom';
   for(const [id,key] of [['eqFrequency','frequency'],['eqGain','gain_db'],['eqQ','q']]){
-    $(id).disabled=!custom;if(fixed)$(id).value=fixed[key];
+    $(id).disabled=busy||!custom;if(fixed)$(id).value=fixed[key];
   }
 }
 $('eqPreset').onchange=updateEqPresetFields;
@@ -99,9 +102,12 @@ function renderPostProcessing(){
   $('eqQ').value=pp.q??1;
   $('peakEnabled').checked=pp.peak_enabled??true;
   $('peakDbfs').value=pp.peak_dbfs??-1;
+  // Preserve actual values from older saves that disagree with the preset label.
+  const fixed=EQ_PRESETS[$('eqPreset').value];
+  if(!fixed||Object.entries(fixed).some(([key,value])=>Number(pp[key]??value)!==value))$('eqPreset').value='custom';
   updateEqPresetFields();
 }
-$('savePostProcessing').onclick=guard(async()=>{await saving;state.settings=await api('/settings/post_processing',json('PUT',{
+$('savePostProcessing').onclick=guard(async()=>{await saving;updateEqPresetFields();state.settings=await api('/settings/post_processing',json('PUT',{
   enabled:$('ppEnabled').checked,
   eq_enabled:$('eqEnabled').checked,
   eq_preset:$('eqPreset').value,
@@ -110,16 +116,16 @@ $('savePostProcessing').onclick=guard(async()=>{await saving;state.settings=awai
   q:Number($('eqQ').value),
   peak_enabled:$('peakEnabled').checked,
   peak_dbfs:Number($('peakDbfs').value),
-}));renderPostProcessing();if(project)syncProject(await api('/projects/'+project.id));message('音声補正の設定を保存しました')});
+}));playback.stop();const preview=$('ppPreviewAudio');preview.pause();preview.removeAttribute('src');preview.load();renderPostProcessing();if(project)syncProject(await api('/projects/'+project.id));message('音声補正の設定を保存しました')});
 function previewAudioUrl(variant){
   const rid=Number($('ppPreviewRow').value);
   const row=project?.rows.find(r=>r.id===rid);
   if(!project||!row)throw Error('試聴する行がありません（生成済みの行を選んでください）');
-  return `/api/projects/${project.id}/audio/${row.id}?variant=${variant}&v=${encodeURIComponent(row.generated_at||'')}&pause_ms=${row.pause_ms??0}`;
+  return audioUrl(project.id,row,variant);
 }
 $('ppPlayBefore').onclick=guard(()=>{const audio=$('ppPreviewAudio');audio.src=previewAudioUrl('raw');audio.play()});
 $('ppPlayAfter').onclick=guard(()=>{const audio=$('ppPreviewAudio');audio.src=previewAudioUrl('processed');audio.play()});
-function updateJob(){const j=state.job;busy=j.running;$('stopGeneration').disabled=!busy||j.stop_requested;$('stopGeneration').textContent=j.stop_requested?'現在行の完了後に停止…':'生成を中断';if(j.fatal_error)message('生成処理が停止しました: '+j.fatal_error,true);$('progress').max=j.total||1;$('progress').value=j.done;$('progressText').textContent=j.running?`${j.done} / ${j.total} 完了・No.${j.current??'—'} 生成中（初回はモデルをロード）`:(j.total?`${j.done} / ${j.total} 完了・エラー ${j.errors} 行`:project?`${project.rows.length} セリフ / 自動保存`:'台本を読み込んでください');for(const id of ['registerMaster','masterName','masterPath','masterFile','missing','selected','all','applyScale','applyPause','bulkScale','bulkPause','saveSettings','normalizeNumbers','wrapSubtitles','savePostProcessing','ppEnabled','eqEnabled','eqPreset','eqFrequency','eqGain','eqQ','peakEnabled','peakDbfs','ppPreviewRow','ppPlayBefore','ppPlayAfter','saveDictionary','addWord','script','voice','projects','newProject','addRow','newRowText','export','exportMode','saveProject','copyProject','projectName','chooseOutput','openProject'])$(id).disabled=busy;document.querySelectorAll('#dictionary input,#dictionary button,#masterList button').forEach(e=>e.disabled=busy||e.dataset.inUse==='true')}
+function updateJob(){const j=state.job;busy=j.running;$('stopGeneration').disabled=!busy||j.stop_requested;$('stopGeneration').textContent=j.stop_requested?'現在行の完了後に停止…':'生成を中断';if(j.fatal_error)message('生成処理が停止しました: '+j.fatal_error,true);$('progress').max=j.total||1;$('progress').value=j.done;$('progressText').textContent=j.running?`${j.done} / ${j.total} 完了・No.${j.current??'—'} 生成中（初回はモデルをロード）`:(j.total?`${j.done} / ${j.total} 完了・エラー ${j.errors} 行`:project?`${project.rows.length} セリフ / 自動保存`:'台本を読み込んでください');for(const id of ['registerMaster','masterName','masterPath','masterFile','missing','selected','all','applyScale','applyPause','bulkScale','bulkPause','saveSettings','normalizeNumbers','wrapSubtitles','savePostProcessing','ppEnabled','eqEnabled','eqPreset','eqFrequency','eqGain','eqQ','peakEnabled','peakDbfs','ppPreviewRow','ppPlayBefore','ppPlayAfter','saveDictionary','addWord','script','voice','projects','newProject','addRow','newRowText','export','exportMode','saveProject','copyProject','projectName','chooseOutput','openProject'])$(id).disabled=busy;document.querySelectorAll('#dictionary input,#dictionary button,#masterList button').forEach(e=>e.disabled=busy||e.dataset.inUse==='true');for(const id of ['eqFrequency','eqGain','eqQ'])$(id).disabled=busy||$('eqPreset').value!=='custom'}
 async function startGeneration(mode,ids){playback.stop();await saving;await api(`/projects/${project.id}/generate`,json('POST',{mode,ids,seed_mode:$('seedMode').value}));state=await api('/state');updateJob();syncProject(await api('/projects/'+project.id))}
 $('projects').onchange=guard(e=>loadProject(e.target.value));
 $('script').onclick=guard(async()=>{await saving;const result=await api('/dialog/script',json('POST',{}));if(result.cancelled)return;project=result;chosen.clear();state=await api('/state');renderState();await loadProject(project.id);updateJob()});
