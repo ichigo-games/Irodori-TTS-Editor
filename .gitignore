@@ -7,6 +7,7 @@ scripts/
 settings.json
 dictionaries/*.json
 *.log
+Irodori-TTS-Editor.code-workspace
 
 # Local working data and dialog history
 /trash/
