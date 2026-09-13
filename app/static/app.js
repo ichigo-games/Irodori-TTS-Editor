@@ -128,7 +128,7 @@ $('ppPlayAfter').onclick=guard(()=>{const audio=$('ppPreviewAudio');audio.src=pr
 function updateJob(){const j=state.job;busy=j.running;$('stopGeneration').disabled=!busy||j.stop_requested;$('stopGeneration').textContent=j.stop_requested?'現在行の完了後に停止…':'生成を中断';if(j.fatal_error)message('生成処理が停止しました: '+j.fatal_error,true);$('progress').max=j.total||1;$('progress').value=j.done;$('progressText').textContent=j.running?`${j.done} / ${j.total} 完了・No.${j.current??'—'} 生成中（初回はモデルをロード）`:(j.total?`${j.done} / ${j.total} 完了・エラー ${j.errors} 行`:project?`${project.rows.length} セリフ`:'台本を読み込んでください');for(const id of ['registerMaster','masterName','masterPath','masterFile','missing','selected','all','applyScale','applyPause','bulkScale','bulkPause','saveSettings','normalizeNumbers','wrapSubtitles','savePostProcessing','ppEnabled','eqEnabled','eqPreset','eqFrequency','eqGain','eqQ','peakEnabled','peakDbfs','ppPreviewRow','ppPlayBefore','ppPlayAfter','saveDictionary','addWord','script','voice','projects','newProject','addRow','addRowAfterSelection','newRowText','export','exportMode','saveProject','copyProject','projectName','chooseOutput','openProject'])$(id).disabled=busy;document.querySelectorAll('#dictionary input,#dictionary button,#masterList button').forEach(e=>e.disabled=busy||e.dataset.inUse==='true');for(const id of ['eqFrequency','eqGain','eqQ'])$(id).disabled=busy||$('eqPreset').value!=='custom'}
 async function startGeneration(mode,ids){playback.stop();await saving;await api(`/projects/${project.id}/generate`,json('POST',{mode,ids,seed_mode:$('seedMode').value}));state=await api('/state');updateJob();syncProject(await api('/projects/'+project.id))}
 $('projects').onchange=guard(async e=>{const next=e.target.value;if(!next)return;if(!await mayLeaveProject()){$('projects').value=project?.id??'';return;}const opened=await api(`/projects/${next}/open-saved`,json('POST',{}));await loadProject(opened.id);renderState()});
-$('script').onclick=guard(async()=>{if(!await mayLeaveProject())return;await saving;const result=await api('/dialog/script',json('POST',{}));if(result.cancelled)return;project=result;chosen.clear();state=await api('/state');renderState();await loadProject(project.id);updateJob()});
+$('script').onclick=guard(async()=>{if(!await mayLeaveProject())return;await saving;const result=await api('/dialog/script',json('POST',{}));if(result.cancelled)return;state=await api('/state');await loadProject(result.id);renderState();updateJob()});
 $('voice').onclick=guard(async()=>{await saving;const result=await api('/dialog/voice',json('POST',{}));if(result.cancelled)return;state.settings=result;renderState();if(project)syncProject(await api('/projects/'+project.id));message('共通マスターを保存しました')});
 $('masterFile').onclick=guard(async()=>{const result=await api('/dialog/master',json('POST',{}));if(result.path)$('masterPath').value=result.path});
 $('saveSettings').onclick=guard(async()=>{await saving;state.settings=await api('/settings',json('PUT',{reference:$('reference').value,duration_scale:Number($('defaultScale').value),normalize_numbers:$('normalizeNumbers').checked,wrap_subtitles:$('wrapSubtitles').checked}));renderState();if(project)syncProject(await api('/projects/'+project.id));message('設定を保存しました')});
@@ -218,8 +218,8 @@ async function persistProject(copyProject) {
   }));
   if (result.cancelled) return false;
   state = await api('/state');
-  renderState();
   await loadProject(result.project.id);
+  renderState();
   $('projectSaved').textContent = '保存済み：' + result.path;
   message('プロジェクトを保存しました');
   return true;
@@ -242,8 +242,8 @@ $('openProject').onclick = guard(async () => {
   const result = await api('/projects/open-file', {method:'POST'});
   if (result.cancelled) return;
   state = await api('/state');
-  renderState();
   await loadProject(result.project.id);
+  renderState();
   message('プロジェクトを開きました');
 });
 
@@ -294,8 +294,8 @@ async function createEmptyProject() {
   playback.stop();
   const created = await api('/projects/new', {method:'POST'});
   state = await api('/state');
-  renderState();
   await loadProject(created.id);
+  renderState();
   $('newRowText').focus();
 }
 $('newProject').onclick = guard(createEmptyProject);
