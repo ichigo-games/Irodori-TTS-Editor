@@ -75,6 +75,19 @@ class EditorTests(unittest.TestCase):
         with patch.object(m, 'choose_path', return_value=''):
             self.assertTrue(self.c.post('/api/dialog/script').json()['cancelled'])
 
+    def test_project_trash_api(self):
+        pid = self.create('管理テスト')
+        self.assertEqual(self.c.post(f'/api/projects/{pid}/trash').status_code, 200)
+        self.assertFalse(any(p['id']==pid for p in self.c.get('/api/state').json()['projects']))
+        self.assertTrue(any(p['id']==pid for p in self.c.get('/api/project-management').json()['trash']))
+        self.assertEqual(self.c.post(f'/api/projects/{pid}/restore').status_code, 200)
+        self.assertEqual(self.c.get(f'/api/projects/{pid}').json()['rows'][0]['speech_text'], '管理テスト')
+        m.job['running'] = True
+        try:
+            self.assertEqual(self.c.post(f'/api/projects/{pid}/trash').status_code, 409)
+        finally:
+            m.job['running'] = False
+
     def test_reopen_reuses_master_by_content(self):
         import copy
         from app.project_files import write_project_file
@@ -584,6 +597,162 @@ class EditorTests(unittest.TestCase):
         self.assertEqual(len(list(folder.iterdir())),4)
         for name, data in original.items():
             self.assertEqual((folder/name).read_bytes(),data)
+
+
+def synth_wav(sr, duration, components):
+    import io
+    import wave
+    import numpy as np
+    n = int(sr * duration)
+    t = np.arange(n) / sr
+    signal = np.zeros(n)
+    for freq, amp in components:
+        signal += amp * np.sin(2 * np.pi * freq * t)
+    pcm = (np.clip(signal, -1, 1) * 32767).astype('<i2').tobytes()
+    buffer = io.BytesIO()
+    with wave.open(buffer, 'wb') as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(sr)
+        out.writeframes(pcm)
+    return buffer.getvalue()
+
+
+def wav_peak_dbfs(data):
+    import io
+    import wave
+    import numpy as np
+    with wave.open(io.BytesIO(data)) as audio:
+        frames = audio.readframes(audio.getnframes())
+    samples = np.frombuffer(frames, dtype='<i2').astype(np.float64) / 32768.0
+    peak = float(np.max(np.abs(samples))) if samples.size else 0.0
+    return 20 * __import__('math').log10(peak) if peak > 0 else float('-inf')
+
+
+def wav_tone_magnitude(data, freq, sr):
+    import io
+    import wave
+    import numpy as np
+    with wave.open(io.BytesIO(data)) as audio:
+        frames = audio.readframes(audio.getnframes())
+    samples = np.frombuffer(frames, dtype='<i2').astype(np.float64)
+    spec = np.fft.rfft(samples)
+    freqs = np.fft.rfftfreq(len(samples), d=1.0 / sr)
+    idx = int(np.argmin(np.abs(freqs - freq)))
+    return float(abs(spec[idx]))
+
+
+DEFAULT_PP = {
+    'enabled': False, 'eq_enabled': True, 'eq_preset': 'soften',
+    'frequency': 3500.0, 'gain_db': -1.5, 'q': 1.0,
+    'peak_enabled': True, 'peak_dbfs': -1.0,
+}
+
+
+class PostProcessingTests(unittest.TestCase):
+    def setUp(self):
+        self.c = TestClient(m.app)
+        m.engine = FakeEngine()
+        m.settings['post_processing'] = dict(DEFAULT_PP)
+        reference = Path(temp.name) / 'pp-reference.wav'
+        reference.write_bytes(b'test')
+        self.c.put('/api/settings', json={'reference': str(reference), 'duration_scale': 1})
+
+    def wait(self):
+        deadline = time.monotonic() + 5
+        while m.job['running'] and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertFalse(m.job['running'])
+
+    def create_with_audio(self, raw):
+        def generate(text, reference, scale, seed, path):
+            Path(path).write_bytes(raw)
+            return seed
+        m.engine.generate = generate
+        response = self.c.post('/api/projects', files={'file': ('pp.txt', '補正テスト'.encode())})
+        pid = response.json()['id']
+        self.c.post(f'/api/projects/{pid}/generate', json={'mode': 'all'})
+        self.wait()
+        return pid
+
+    def test_default_is_disabled_and_backward_compatible(self):
+        state = self.c.get('/api/state').json()
+        self.assertEqual(state['settings']['post_processing'], DEFAULT_PP)
+
+    def test_post_processing_off_matches_raw_and_export(self):
+        raw = synth_wav(48000, 0.2, [(440, 0.5)])
+        pid = self.create_with_audio(raw)
+        default = self.c.get(f'/api/projects/{pid}/audio/1').content
+        via_raw = self.c.get(f'/api/projects/{pid}/audio/1?variant=raw').content
+        self.assertEqual(default, via_raw)
+        exported = self.c.post(f'/api/projects/{pid}/export', json={'ids': [1]}).json()
+        self.assertEqual((Path(exported['folder']) / exported['files'][0]).read_bytes(), default)
+
+    def test_eq_attenuates_target_frequency_only(self):
+        raw = synth_wav(48000, 1.0, [(3500, 0.4), (800, 0.4)])
+        pid = self.create_with_audio(raw)
+        self.c.put('/api/settings/post_processing', json={
+            **DEFAULT_PP, 'enabled': True, 'eq_enabled': True, 'eq_preset': 'custom',
+            'frequency': 3500, 'gain_db': -1.5, 'q': 1.0, 'peak_enabled': False,
+        })
+        before = self.c.get(f'/api/projects/{pid}/audio/1?variant=raw').content
+        after = self.c.get(f'/api/projects/{pid}/audio/1?variant=processed').content
+        mag_before_3500 = wav_tone_magnitude(before, 3500, 48000)
+        mag_after_3500 = wav_tone_magnitude(after, 3500, 48000)
+        mag_before_800 = wav_tone_magnitude(before, 800, 48000)
+        mag_after_800 = wav_tone_magnitude(after, 800, 48000)
+        self.assertLess(mag_after_3500, mag_before_3500 * 0.97)
+        self.assertGreater(mag_after_800, mag_before_800 * 0.97)
+
+    def test_peak_control_reduces_only_when_over_target(self):
+        loud = synth_wav(48000, 0.2, [(1000, 10 ** (-0.1 / 20))])
+        pid = self.create_with_audio(loud)
+        self.c.put('/api/settings/post_processing', json={
+            **DEFAULT_PP, 'enabled': True, 'eq_enabled': False, 'peak_enabled': True, 'peak_dbfs': -1.0,
+        })
+        processed = self.c.get(f'/api/projects/{pid}/audio/1?variant=processed').content
+        self.assertAlmostEqual(wav_peak_dbfs(processed), -1.0, delta=0.15)
+
+        quiet = synth_wav(48000, 0.2, [(1000, 10 ** (-2.0 / 20))])
+        pid2 = self.create_with_audio(quiet)
+        self.c.put('/api/settings/post_processing', json={
+            **DEFAULT_PP, 'enabled': True, 'eq_enabled': False, 'peak_enabled': True, 'peak_dbfs': -1.0,
+        })
+        processed2 = self.c.get(f'/api/projects/{pid2}/audio/1?variant=processed').content
+        self.assertAlmostEqual(wav_peak_dbfs(processed2), -2.0, delta=0.15)
+
+    def test_auto_variant_follows_enabled_flag_and_export_matches(self):
+        raw = synth_wav(48000, 0.2, [(3500, 0.4)])
+        pid = self.create_with_audio(raw)
+        self.c.put('/api/settings/post_processing', json={
+            **DEFAULT_PP, 'enabled': True, 'eq_enabled': True, 'frequency': 3500, 'gain_db': -3, 'q': 1.0,
+            'peak_enabled': False,
+        })
+        auto_on = self.c.get(f'/api/projects/{pid}/audio/1').content
+        processed = self.c.get(f'/api/projects/{pid}/audio/1?variant=processed').content
+        self.assertEqual(auto_on, processed)
+        exported = self.c.post(f'/api/projects/{pid}/export', json={'ids': [1]}).json()
+        self.assertEqual((Path(exported['folder']) / exported['files'][0]).read_bytes(), auto_on)
+
+        self.c.put('/api/settings/post_processing', json={**DEFAULT_PP, 'enabled': False})
+        auto_off = self.c.get(f'/api/projects/{pid}/audio/1').content
+        via_raw = self.c.get(f'/api/projects/{pid}/audio/1?variant=raw').content
+        self.assertEqual(auto_off, via_raw)
+
+    def test_validation_rejects_out_of_range_values(self):
+        for field, value in (('frequency', 99999), ('gain_db', 50), ('q', 0), ('peak_dbfs', 5)):
+            response = self.c.put('/api/settings/post_processing', json={**DEFAULT_PP, field: value})
+            self.assertEqual(response.status_code, 422, f'{field}={value}')
+
+    def test_changing_post_processing_does_not_trigger_regeneration(self):
+        raw = synth_wav(48000, 0.2, [(1000, 0.5)])
+        pid = self.create_with_audio(raw)
+        calls_before = len(m.engine.calls)
+        status_before = m.load_project(pid)['rows'][0]['status']
+        self.c.put('/api/settings/post_processing', json={**DEFAULT_PP, 'enabled': True, 'gain_db': -6})
+        self.assertEqual(len(m.engine.calls), calls_before)
+        self.assertEqual(m.load_project(pid)['rows'][0]['status'], status_before)
+        self.assertFalse(m.job['running'])
 
 
 if __name__ == '__main__':

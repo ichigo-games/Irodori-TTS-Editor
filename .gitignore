@@ -7,3 +7,23 @@ scripts/
 settings.json
 dictionaries/*.json
 *.log
+Irodori-TTS-Editor.code-workspace
+
+# Local working data and dialog history
+/trash/
+/dialog_locations.json
+*.irodori
+*.before-voice-migration.bak
+*.bak
+
+# Generated/imported audio
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+
+# Development caches
+.pytest_cache/
+.ruff_cache/
+*.py[cod]
