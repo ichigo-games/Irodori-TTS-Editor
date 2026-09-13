@@ -61,7 +61,7 @@ class EditorTests(unittest.TestCase):
         for kind, title, expected in [('script','script-test',first),('wav','voice-test',second)]:
             with patch.object(m.subprocess, 'run', return_value=result('')) as run:
                 self.assertEqual(m.choose_path(kind,title), '')
-                self.assertEqual(json.loads(run.call_args.kwargs['input'])['initialdir'], str(expected))
+                self.assertEqual(json.loads(run.call_args.kwargs['input'])['initialdir'], expected.resolve().as_posix())
             stored = m.read_json(m.DATA/'dialog_locations.json', {})
             self.assertEqual(stored[kind+':'+title], str(expected))
 
@@ -567,7 +567,7 @@ class EditorTests(unittest.TestCase):
         self.assertEqual(self.c.post(f'/api/projects/{pid}/export',json={}).status_code,400)
         self.assertEqual(self.c.post(f'/api/projects/{pid}/rows',json={'text':'  '}).status_code,400)
         self.c.put('/api/settings',json=dict(m.settings,duration_scale=.85))
-        self.assertEqual(self.c.post(f'/api/projects/{pid}/rows',json={'text':'いちごです'}).json()['id'],1)
+        self.assertEqual(self.c.post(f'/api/projects/{pid}/rows',json={'text':'いちごです'}).json()['ids'],[1])
         row = self.c.get(f'/api/projects/{pid}').json()['rows'][0]
         self.assertEqual(row['duration_scale'],.85)
         self.assertEqual(row['speech_text'],row['subtitle_text'])
@@ -579,6 +579,36 @@ class EditorTests(unittest.TestCase):
         self.assertEqual(rows[0],original)
         self.assertEqual(rows[1]['id'],2)
         self.assertEqual(rows[1]['status'],'pending')
+
+    def test_add_rows_bulk_and_insert_position(self):
+        pid = self.create('一\n二\n三')
+        self.c.post(f'/api/projects/{pid}/generate', json={'mode': 'all'})
+        self.wait()
+        before = m.load_project(pid)['rows']
+        wav_two, wav_three = before[1]['wav'], before[2]['wav']
+
+        response = self.c.post(f'/api/projects/{pid}/rows', json={'text': 'あ\n\n  \nい', 'before_id': before[1]['id']})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['ids'], [2, 3])
+        rows = self.c.get(f'/api/projects/{pid}').json()['rows']
+        self.assertEqual([r['speech_text'] for r in rows], ['一', 'あ', 'い', '二', '三'])
+        self.assertEqual([r['id'] for r in rows], [1, 2, 3, 4, 5])
+        self.assertEqual(rows[3]['wav'], wav_two)
+        self.assertEqual(rows[4]['wav'], wav_three)
+        self.assertEqual(rows[3]['status'], 'generated')
+        self.assertEqual(rows[1]['status'], 'pending')
+
+        self.assertEqual(self.c.post(f'/api/projects/{pid}/rows', json={'text': '末尾'}).json()['ids'], [6])
+        self.assertEqual(self.c.get(f'/api/projects/{pid}').json()['rows'][-1]['speech_text'], '末尾')
+
+        self.assertEqual(self.c.post(f'/api/projects/{pid}/rows', json={'text': 'だめ', 'before_id': 999}).status_code, 400)
+        self.assertEqual(self.c.post(f'/api/projects/{pid}/rows', json={'text': '  \n \n'}).status_code, 400)
+
+        m.job['running'] = True
+        try:
+            self.assertEqual(self.c.post(f'/api/projects/{pid}/rows', json={'text': '拒否されるはず'}).status_code, 409)
+        finally:
+            m.job['running'] = False
 
     def test_export_timestamp_seed_and_collision(self):
         from datetime import datetime
