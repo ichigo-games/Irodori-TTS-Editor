@@ -349,15 +349,19 @@ class ProjectSave(BaseModel):
 dialog_lock = threading.Lock()
 
 
-def choose_path(kind, title, initial='', name='project.irodori'):
+
+def choose_path(kind, title, initial='', name='project.irodori', *, location_key=None):
     if not dialog_lock.acquire(blocking=False):
         raise HTTPException(409, '開いている保存先ダイアログを先に閉じてください')
     try:
         locations = read_json(DATA / 'dialog_locations.json', {})
-        key = kind + ':' + title
-        remembered = locations.get(key, '')
+        legacy_key = kind + ':' + title
+        key = location_key or legacy_key
+        remembered = locations.get(key, locations.get(legacy_key, ''))
         if remembered and Path(remembered).is_dir():
             initial = remembered
+        # Tk uses Tcl paths; pass an absolute, forward-slash path on Windows too.
+        initial = Path(initial).resolve().as_posix() if initial and Path(initial).is_dir() else ROOT.as_posix()
         result = subprocess.run([sys.executable, '-B', '-X', 'utf8', '-m', 'app.dialogs'],
                                 input=json.dumps(dict(kind=kind, title=title, initialdir=initial, name=name)),
                                 capture_output=True, text=True, encoding='utf-8', cwd=ROOT)
@@ -374,7 +378,7 @@ def choose_path(kind, title, initial='', name='project.irodori'):
 
 @app.post('/api/dialog/script')
 def choose_script():
-    selected = choose_path('script', '台本を選択')
+    selected = choose_path('script', '台本を選択', location_key='script')
     if not selected:
         return {'cancelled': True}
     with Path(selected).open('rb') as stream:
@@ -383,7 +387,7 @@ def choose_script():
 
 @app.post('/api/dialog/voice')
 def choose_voice():
-    selected = choose_path('wav', '共通マスターのWAVを選択')
+    selected = choose_path('wav', '共通マスターのWAVを選択', location_key='voice')
     if not selected:
         return {'cancelled': True}
     with Path(selected).open('rb') as stream:
@@ -392,17 +396,17 @@ def choose_voice():
 
 @app.post('/api/dialog/master')
 def choose_master():
-    return {'path': choose_path('wav', '登録するマスターのWAVを選択')}
+    return {'path': choose_path('wav', '登録するマスターのWAVを選択', location_key='master')}
 
 
 @app.post('/api/dialog/output')
 def choose_output(value: Export):
-    return {'path': choose_path('folder', 'YMM4用の出力先フォルダを選択', value.folder)}
+    return {'path': choose_path('folder', 'YMM4用の出力先フォルダを選択', value.folder, location_key='output')}
 
 
 @app.post('/api/projects/open-file')
 def open_project_file():
-    selected = choose_path('open', 'Irodoriプロジェクトを開く')
+    selected = choose_path('open', 'Irodoriプロジェクトを開く', location_key='project_open')
     if not selected:
         return {'cancelled': True}
     with lock:
@@ -454,7 +458,7 @@ def save_project(pid: str, value: ProjectSave):
             existing = load_project(pid).get('project_file', '')
         selected = choose_path('save', '名前を付けてプロジェクトを保存',
                                str(Path(existing).parent) if existing else '',
-                               re.sub(r'[<>:"/\\|?*]', '_', Path(value.name).stem) + '.irodori')
+                               re.sub(r'[<>:"/\\|?*]', '_', Path(value.name).stem) + '.irodori', location_key='project_save')
         if not selected:
             return {'cancelled': True}
     with lock:

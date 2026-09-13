@@ -61,7 +61,7 @@ class EditorTests(unittest.TestCase):
         for kind, title, expected in [('script','script-test',first),('wav','voice-test',second)]:
             with patch.object(m.subprocess, 'run', return_value=result('')) as run:
                 self.assertEqual(m.choose_path(kind,title), '')
-                self.assertEqual(json.loads(run.call_args.kwargs['input'])['initialdir'], str(expected))
+                self.assertEqual(json.loads(run.call_args.kwargs['input'])['initialdir'], expected.resolve().as_posix())
             stored = m.read_json(m.DATA/'dialog_locations.json', {})
             self.assertEqual(stored[kind+':'+title], str(expected))
 
