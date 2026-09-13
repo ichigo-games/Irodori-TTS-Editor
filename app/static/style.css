@@ -58,10 +58,12 @@ main{flex:1;min-height:0;display:flex;flex-direction:column;padding:10px 16px}
 #playbackStatus{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
 #newRowText{min-width:80px}
 #exportInfo{flex:none;margin:0;max-height:50px;overflow:auto}
-#projectSaved{display:none}
+#projectSaved{display:block;flex:none;margin:2px 0 6px;max-height:36px;overflow:auto}
 th{padding:8px}td{padding:6px 8px}
 
 #rows .drag-handle{cursor:grab;min-width:26px}#rows .drag-handle:active{cursor:grabbing}
 #rows tr.dragging-row{opacity:.55}#rows tr.drop-before td{box-shadow:inset 0 3px #65c5ba}#rows tr.drop-after td{box-shadow:inset 0 -3px #65c5ba}
 
 .master-entry{flex-wrap:wrap;border-bottom:1px solid #334051}.master-entry>div{flex-basis:100%;min-width:0}.master-entry small{display:block;overflow-wrap:anywhere;margin-top:4px}
+
+#projectManager{width:min(1000px,90vw);max-height:85vh;overflow:auto;background:#182330;color:#e0e7ef;border:1px solid #526276;border-radius:8px}#projectManager .project-entry{display:flex;gap:14px;align-items:center;padding:12px 0;border-bottom:1px solid #334051}#projectManager .project-entry>div{flex:1;overflow-wrap:anywhere}#projectManager small{display:block}

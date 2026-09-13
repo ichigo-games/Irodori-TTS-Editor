@@ -75,6 +75,19 @@ class EditorTests(unittest.TestCase):
         with patch.object(m, 'choose_path', return_value=''):
             self.assertTrue(self.c.post('/api/dialog/script').json()['cancelled'])
 
+    def test_project_trash_api(self):
+        pid = self.create('管理テスト')
+        self.assertEqual(self.c.post(f'/api/projects/{pid}/trash').status_code, 200)
+        self.assertFalse(any(p['id']==pid for p in self.c.get('/api/state').json()['projects']))
+        self.assertTrue(any(p['id']==pid for p in self.c.get('/api/project-management').json()['trash']))
+        self.assertEqual(self.c.post(f'/api/projects/{pid}/restore').status_code, 200)
+        self.assertEqual(self.c.get(f'/api/projects/{pid}').json()['rows'][0]['speech_text'], '管理テスト')
+        m.job['running'] = True
+        try:
+            self.assertEqual(self.c.post(f'/api/projects/{pid}/trash').status_code, 409)
+        finally:
+            m.job['running'] = False
+
     def test_reopen_reuses_master_by_content(self):
         import copy
         from app.project_files import write_project_file

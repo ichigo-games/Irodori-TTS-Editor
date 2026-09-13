@@ -47,6 +47,26 @@ class NumberTests(unittest.TestCase):
         self.assertEqual(normalize_for_tts(source,entries,normalize_numeric=False),'エルアールごの攻撃力30%')
         self.assertEqual(source,'LR5の攻撃力30%')
 
+    def test_hp_readings(self):
+        cases = {'HP':'エイチピー','低HP':'テイエイチピー','高HP':'コウエイチピー',
+                 '現在HP':'ゲンザイエイチピー','HP割合':'エイチピーワリアイ',
+                 '現在ＨＰの30%':'ゲンザイエイチピーのさんじゅっぱーせんと',
+                 '低hpの対象':'テイエイチピーの対象'}
+        for source, expected in cases.items():
+            self.assertEqual(normalize_for_tts(source),expected)
+            self.assertEqual(normalize_for_tts(expected),expected)
+        self.assertEqual(normalize_for_tts('HP30%',normalize_numeric=False),'エイチピー30%')
+        for source in ['PHP','HPA','https://example.com/HP',r'E:\HP\voice.wav','HP.wav']:
+            self.assertEqual(normalize_for_tts(source),source)
+
+    def test_hp_user_dictionary_wins(self):
+        entries=[dict(word='HP',reading='えいちぴー',enabled=True)]
+        self.assertEqual(normalize_for_tts('現在HP',entries),'現在えいちぴー')
+        entries=[dict(word='現在HP',reading='現在HPの独自読み',enabled=True)]
+        self.assertEqual(normalize_for_tts('現在HP',entries),'現在HPの独自読み')
+        entries[0]['enabled']=False
+        self.assertEqual(normalize_for_tts('現在HP',entries),'ゲンザイエイチピー')
+
 
 if __name__ == '__main__':
     unittest.main()

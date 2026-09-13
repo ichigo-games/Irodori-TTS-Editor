@@ -21,6 +21,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from app import working_sessions
+from app.project_management import store_voice, migrate_references, move_project
 from app.tts import IrodoriEngine
 from app.audio_output import output_audio
 from app.post_processing import process_audio
@@ -38,7 +40,9 @@ def read_json(path, default):
     return json.loads(path.read_text('utf-8')) if path.exists() else default
 
 
-def atomic_json(path, data):
+def atomic_json(path, data, mark_dirty=True):
+    if mark_dirty and path.name == 'project.json' and working_sessions.ROOT in path.resolve().parents:
+        data['dirty'] = True
     tmp = path.with_suffix('.tmp')
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), 'utf-8')
     tmp.replace(path)
@@ -139,10 +143,11 @@ async def local_origin(request, call_next):
 def project_path(pid):
     if not re.fullmatch(r'[a-f0-9]{32}', pid):
         raise HTTPException(404, 'プロジェクトがありません')
-    path = DATA / 'projects' / pid / 'project.json'
-    if not path.exists():
+    try:
+        return working_sessions.working_path(DATA, pid)
+    except (ValueError, FileNotFoundError):
         raise HTTPException(404, 'プロジェクトがありません')
-    return path
+
 
 
 def load_project(pid):
@@ -181,7 +186,7 @@ def resolve_reference(row):
 
 
 def invalidate_reference(reference=None):
-    for path in (DATA / 'projects').glob('*/project.json'):
+    for path in working_sessions.ROOT.glob('*/project.json'):
         p = read_json(path, {})
         for row in p['rows']:
             if row['status'] == 'generated' and row.get('reference') != resolve_reference(row):
@@ -259,7 +264,7 @@ def upload_master(file: UploadFile, name: str = Form(...)):
 
 def master_usage(master):
     projects = []
-    for path in (DATA / 'projects').glob('*/project.json'):
+    for path in list((DATA / 'projects').glob('*/project.json')) + list((DATA / 'trash').glob('*/project.json')) + list(working_sessions.ROOT.glob('*/project.json')):
         p = read_json(path, {})
         count = sum(r.get('master_id') == master['id'] for r in p.get('rows', []))
         if count:
@@ -403,7 +408,7 @@ def open_project_file():
     with lock:
         idle()
         pid = uuid.uuid4().hex
-        folder = DATA / 'projects' / pid
+        folder = working_sessions.directory(pid)
         try:
             p = read_project_file(selected, folder, lambda row: RowEdit.model_validate(row))
             for master in p.pop('masters', []):
@@ -424,7 +429,7 @@ def open_project_file():
                     while any(m['name'].casefold() == name.casefold() for m in settings['masters']):
                         name = f'{base} ({n})'
                         n += 1
-                    reference = master['reference']
+                    reference = store_voice(DATA, master['reference'])
                     settings['masters'].append(dict(id=mid, name=name, reference=reference,
                                                    original_name=master.get('original_name')))
                 for row in p['rows']:
@@ -433,8 +438,8 @@ def open_project_file():
                         if row.get('reference') == old_ref:
                             row['reference'] = reference
             atomic_json(DATA / 'settings.json', settings)
-            p.update(id=pid, name=Path(selected).stem, project_file=selected)
-            atomic_json(folder / 'project.json', p)
+            p.update(id=pid, name=Path(selected).stem, project_file=selected, dirty=False, autosave=False)
+            atomic_json(folder / 'project.json', p, mark_dirty=False)
         except Exception as exc:
             raise HTTPException(400, f'プロジェクトを開けません：{exc}') from exc
         return {'project': p, 'path': selected}
@@ -460,7 +465,7 @@ def save_project(pid: str, value: ProjectSave):
         if value.copy_project:
             old_folder = project_path(pid).parent
             p['id'] = uuid.uuid4().hex
-            new_folder = DATA / 'projects' / p['id']
+            new_folder = working_sessions.directory(p['id'])
             shutil.copytree(old_folder, new_folder)
         p.update(name=value.name.strip(), output_folder=value.output_folder.strip(),
                  saved_at=datetime.now().isoformat())
@@ -487,12 +492,115 @@ def save_project(pid: str, value: ProjectSave):
                         used[mid] = dict(id=mid, name=name, reference=ref)
                     row['master_id'] = mid
                 snapshot['masters'] = list(used.values())
-                write_project_file(target, snapshot, DATA / 'projects' / p['id'])
+                write_project_file(target, snapshot, project_path(p['id']).parent)
             except (OSError, ValueError) as exc:
                 raise HTTPException(400, f'保存できません：{exc}') from exc
-        path = DATA / 'projects' / p['id'] / 'project.json'
-        atomic_json(path, p)
-        return {'project': p, 'path': str(target or path)}
+        if not target:
+            raise HTTPException(400, '名前を付けて .irodori ファイルに保存してください')
+        p.update(dirty=False)
+        catalog = next((q.parent.name for q in (DATA / 'projects').glob('*/project.json')
+                        if Path(read_json(q, {}).get('project_file', '')).resolve() == Path(target).resolve()),
+                       uuid.uuid4().hex if (DATA / 'projects' / p['id']).exists() else p['id'])
+        p['catalog_id'] = catalog
+        source_folder = project_path(p['id']).parent
+        destination = DATA / 'projects' / catalog
+        shutil.copytree(source_folder, destination, dirs_exist_ok=True)
+        snapshot = copy.deepcopy(p)
+        snapshot.update(id=catalog, autosave=False)
+        atomic_json(destination / 'project.json', snapshot)
+        atomic_json(source_folder / 'project.json', p, mark_dirty=False)
+        return {'project': p, 'path': str(target)}
+
+
+class AutosaveOption(BaseModel):
+    enabled: bool
+
+
+@app.put('/api/projects/{pid}/autosave')
+def set_autosave(pid: str, value: AutosaveOption):
+    with lock:
+        idle()
+        p = load_project(pid)
+        if value.enabled and not p.get('project_file'):
+            raise HTTPException(400, '先にプロジェクトを保存してください')
+        p['autosave'] = value.enabled
+        atomic_json(project_path(pid), p, mark_dirty=False)
+        return p
+
+
+@app.post('/api/projects/{pid}/open-saved')
+def open_saved_project(pid: str):
+    with lock:
+        idle()
+        if not re.fullmatch(r'[a-f0-9]{32}', pid):
+            raise HTTPException(404, 'プロジェクトがありません')
+        source = DATA / 'projects' / pid
+        if not (source / 'project.json').is_file():
+            raise HTTPException(404, 'プロジェクトがありません')
+        new_id = uuid.uuid4().hex
+        destination = working_sessions.directory(new_id)
+        shutil.copytree(source, destination)
+        p = read_json(destination / 'project.json', {})
+        p.update(id=new_id, catalog_id=pid, dirty=False, autosave=False)
+        atomic_json(destination / 'project.json', p, mark_dirty=False)
+        return p
+
+
+@app.post('/api/projects/{pid}/close')
+def close_working_project(pid: str):
+    with lock:
+        idle()
+        working_sessions.discard(pid)
+        return {'closed': pid}
+
+
+
+@app.on_event('startup')
+def migrate_project_voices():
+    with lock:
+        try:
+            migrate_references(DATA, settings, atomic_json)
+        except (OSError, ValueError) as exc:
+            print(f'マスター移行を完了できませんでした（削除操作時にも再確認します）：{exc}')
+
+
+@app.get('/api/project-management')
+def project_management():
+    with lock:
+        result = {}
+        for area in ('projects', 'trash'):
+            items = []
+            for path in (DATA / area).glob('*/project.json'):
+                p = read_json(path, {})
+                items.append({'id': path.parent.name, 'name': p.get('name', path.parent.name),
+                              'rows': len(p.get('rows', [])),
+                              'updated': datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec='seconds'),
+                              'project_file': p.get('project_file', '')})
+            result[area] = sorted(items, key=lambda p: p['updated'], reverse=True)
+        return result
+
+
+@app.post('/api/projects/{pid}/trash')
+def trash_project(pid: str):
+    with lock:
+        idle()
+        try:
+            migrate_references(DATA, settings, atomic_json)
+            move_project(DATA, pid)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {'id': pid}
+
+
+@app.post('/api/projects/{pid}/restore')
+def restore_project(pid: str):
+    with lock:
+        idle()
+        try:
+            move_project(DATA, pid, restore=True)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {'id': pid}
 
 
 @app.get('/api/state')
@@ -541,7 +649,7 @@ def save_dictionary(entries: list[Entry]):
             raise HTTPException(400, '辞書の表記が重複しています')
         dictionary[:] = [e.model_dump() for e in entries]
         atomic_json(DATA / 'dictionaries' / 'reading.json', dictionary)
-        for path in (DATA / 'projects').glob('*/project.json'):
+        for path in working_sessions.ROOT.glob('*/project.json'):
             p = read_json(path, {})
             for row in p['rows']:
                 if row['status'] == 'generated' and row.get('effective_text') != prepare_text(row['speech_text']):
@@ -559,7 +667,7 @@ def create_project(file: UploadFile):
         if not lines:
             raise HTTPException(400, '台本にセリフがありません')
         pid = uuid.uuid4().hex
-        folder = DATA / 'projects' / pid
+        folder = working_sessions.directory(pid)
         (folder / 'audio').mkdir(parents=True)
         p = {'id': pid, 'name': file.filename, 'created': datetime.now().isoformat(), 'rows': []}
         for n, (source, text, master_id, pause_ms) in enumerate(lines, 1):
@@ -575,7 +683,7 @@ def new_project():
     with lock:
         idle()
         pid = uuid.uuid4().hex
-        folder = DATA / 'projects' / pid
+        folder = working_sessions.directory(pid)
         (folder / 'audio').mkdir(parents=True)
         p = dict(id=pid, name='新規プロジェクト', created=datetime.now().isoformat(), rows=[])
         atomic_json(folder / 'project.json', p)
@@ -811,7 +919,7 @@ def export(pid: str, value: Export):
         if parent == engine_home or engine_home in parent.parents:
             raise HTTPException(400, 'Irodori-TTS本体のフォルダには出力できません')
         folder = parent
-        if folder == DATA.resolve() or any(folder == (DATA / part).resolve() or (DATA / part).resolve() in folder.parents for part in ('projects', 'app', 'voices', 'dictionaries')):
+        if folder == DATA.resolve() or any(folder == (DATA / part).resolve() or (DATA / part).resolve() in folder.parents for part in ('projects', 'trash', 'app', 'voices', 'dictionaries')):
             raise HTTPException(400, '作業データの保存場所には出力できません。専用の出力先を指定してください。')
         try:
             folder.mkdir(parents=True, exist_ok=True)

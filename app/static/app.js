@@ -80,9 +80,9 @@ function syncProject(next) {
   renderPreviewRowOptions();
 }
 
-async function loadProject(id){playback.stop();await saving;if(!id)return;project=await api('/projects/'+id);chosen.clear();selectionAnchor=null;$('projects').value=id;$('name').textContent=project.name;localStorage.setItem('project',id);renderRows();$('projectName').value=project.name;$('projectSaved').textContent=project.project_file?'保存先：'+project.project_file:project.saved_at?'保存日時：'+project.saved_at:'編集内容は自動保存されています。名前を付けて保存できます。';showExportInfo()}
+async function loadProject(id){playback.stop();await saving;if(!id)return;project=await api('/projects/'+id);chosen.clear();selectionAnchor=null;$('projects').value=id;$('name').textContent=project.name;localStorage.setItem('project',id);renderRows();$('projectName').value=project.name;$('projectSaved').textContent=project.project_file?'保存先：'+project.project_file:project.saved_at?'保存日時：'+project.saved_at:'未保存：保存ボタンでプロジェクトを保存してください';showExportInfo();localProjectEdits=false;updateSaveStatus();if(discardOnSwitch&&discardOnSwitch!==id){const old=discardOnSwitch;discardOnSwitch=null;await api(`/projects/${old}/close`,json('POST',{}))}}
 function renderDictionary(){const root=$('dictionary');root.replaceChildren();for(const entry of state.dictionary){const r=node('div',undefined,'dictrow');const enabled=node('input');enabled.type='checkbox';enabled.checked=entry.enabled;enabled.onchange=()=>entry.enabled=enabled.checked;const word=node('input');word.type='text';word.value=entry.word;word.placeholder='表記';word.oninput=()=>entry.word=word.value;const reading=node('input');reading.type='text';reading.value=entry.reading;reading.placeholder='読み';reading.oninput=()=>entry.reading=reading.value;const remove=node('button','削除');remove.onclick=()=>{state.dictionary=state.dictionary.filter(e=>e!==entry);renderDictionary()};r.append(enabled,word,node('span','→'),reading,remove);root.append(r)}}
-function renderState(){const select=$('projects');const current=project?.id||select.value;select.replaceChildren(node('option','プロジェクトを選択'));select.firstChild.value='';for(const p of state.projects){const o=node('option',p.name);o.value=p.id;select.append(o)}select.value=current;$('reference').value=state.settings.reference;const common=(state.settings.masters??[]).find(m=>m.reference===state.settings.reference);$('referenceName').textContent=common?`共通マスター：${common.name}`:state.settings.reference_original_name||state.settings.reference.split(/[\\/]/).pop()||'未設定';$('referenceName').title=state.settings.reference;$('referenceDetails').textContent=`元ファイル名：${common?.original_name||state.settings.reference_original_name||'記録なし（以前の登録）'}\n保存先：${state.settings.reference||'未設定'}`;$('defaultScale').value=state.settings.duration_scale;$('normalizeNumbers').checked=state.settings.normalize_numbers??true;$('wrapSubtitles').checked=state.settings.wrap_subtitles??true;renderPostProcessing();renderDictionary();renderMasters()}
+function renderState(){const select=$('projects');const current=project?.id||select.value;select.replaceChildren(node('option','プロジェクトを選択'));select.firstChild.value='';for(const p of state.projects){const o=node('option',p.name);o.value=p.id;select.append(o)}if(project&&!state.projects.some(p=>p.id===project.id)){const o=node('option',project.name+'（作業中）');o.value=project.id;select.append(o)}select.value=current;$('reference').value=state.settings.reference;const common=(state.settings.masters??[]).find(m=>m.reference===state.settings.reference);$('referenceName').textContent=common?`共通マスター：${common.name}`:state.settings.reference_original_name||state.settings.reference.split(/[\\/]/).pop()||'未設定';$('referenceName').title=state.settings.reference;$('referenceDetails').textContent=`元ファイル名：${common?.original_name||state.settings.reference_original_name||'記録なし（以前の登録）'}\n保存先：${state.settings.reference||'未設定'}`;$('defaultScale').value=state.settings.duration_scale;$('normalizeNumbers').checked=state.settings.normalize_numbers??true;$('wrapSubtitles').checked=state.settings.wrap_subtitles??true;renderPostProcessing();renderDictionary();renderMasters()}
 
 const EQ_PRESETS={none:{frequency:3500,gain_db:0,q:1},soften:{frequency:3500,gain_db:-1.5,q:1}};
 function updateEqPresetFields(){
@@ -125,10 +125,10 @@ function previewAudioUrl(variant){
 }
 $('ppPlayBefore').onclick=guard(()=>{const audio=$('ppPreviewAudio');audio.src=previewAudioUrl('raw');audio.play()});
 $('ppPlayAfter').onclick=guard(()=>{const audio=$('ppPreviewAudio');audio.src=previewAudioUrl('processed');audio.play()});
-function updateJob(){const j=state.job;busy=j.running;$('stopGeneration').disabled=!busy||j.stop_requested;$('stopGeneration').textContent=j.stop_requested?'現在行の完了後に停止…':'生成を中断';if(j.fatal_error)message('生成処理が停止しました: '+j.fatal_error,true);$('progress').max=j.total||1;$('progress').value=j.done;$('progressText').textContent=j.running?`${j.done} / ${j.total} 完了・No.${j.current??'—'} 生成中（初回はモデルをロード）`:(j.total?`${j.done} / ${j.total} 完了・エラー ${j.errors} 行`:project?`${project.rows.length} セリフ / 自動保存`:'台本を読み込んでください');for(const id of ['registerMaster','masterName','masterPath','masterFile','missing','selected','all','applyScale','applyPause','bulkScale','bulkPause','saveSettings','normalizeNumbers','wrapSubtitles','savePostProcessing','ppEnabled','eqEnabled','eqPreset','eqFrequency','eqGain','eqQ','peakEnabled','peakDbfs','ppPreviewRow','ppPlayBefore','ppPlayAfter','saveDictionary','addWord','script','voice','projects','newProject','addRow','newRowText','export','exportMode','saveProject','copyProject','projectName','chooseOutput','openProject'])$(id).disabled=busy;document.querySelectorAll('#dictionary input,#dictionary button,#masterList button').forEach(e=>e.disabled=busy||e.dataset.inUse==='true');for(const id of ['eqFrequency','eqGain','eqQ'])$(id).disabled=busy||$('eqPreset').value!=='custom'}
+function updateJob(){const j=state.job;busy=j.running;$('stopGeneration').disabled=!busy||j.stop_requested;$('stopGeneration').textContent=j.stop_requested?'現在行の完了後に停止…':'生成を中断';if(j.fatal_error)message('生成処理が停止しました: '+j.fatal_error,true);$('progress').max=j.total||1;$('progress').value=j.done;$('progressText').textContent=j.running?`${j.done} / ${j.total} 完了・No.${j.current??'—'} 生成中（初回はモデルをロード）`:(j.total?`${j.done} / ${j.total} 完了・エラー ${j.errors} 行`:project?`${project.rows.length} セリフ`:'台本を読み込んでください');for(const id of ['registerMaster','masterName','masterPath','masterFile','missing','selected','all','applyScale','applyPause','bulkScale','bulkPause','saveSettings','normalizeNumbers','wrapSubtitles','savePostProcessing','ppEnabled','eqEnabled','eqPreset','eqFrequency','eqGain','eqQ','peakEnabled','peakDbfs','ppPreviewRow','ppPlayBefore','ppPlayAfter','saveDictionary','addWord','script','voice','projects','newProject','addRow','newRowText','export','exportMode','saveProject','copyProject','projectName','chooseOutput','openProject'])$(id).disabled=busy;document.querySelectorAll('#dictionary input,#dictionary button,#masterList button').forEach(e=>e.disabled=busy||e.dataset.inUse==='true');for(const id of ['eqFrequency','eqGain','eqQ'])$(id).disabled=busy||$('eqPreset').value!=='custom'}
 async function startGeneration(mode,ids){playback.stop();await saving;await api(`/projects/${project.id}/generate`,json('POST',{mode,ids,seed_mode:$('seedMode').value}));state=await api('/state');updateJob();syncProject(await api('/projects/'+project.id))}
-$('projects').onchange=guard(e=>loadProject(e.target.value));
-$('script').onclick=guard(async()=>{await saving;const result=await api('/dialog/script',json('POST',{}));if(result.cancelled)return;project=result;chosen.clear();state=await api('/state');renderState();await loadProject(project.id);updateJob()});
+$('projects').onchange=guard(async e=>{const next=e.target.value;if(!next)return;if(!await mayLeaveProject()){$('projects').value=project?.id??'';return;}const opened=await api(`/projects/${next}/open-saved`,json('POST',{}));await loadProject(opened.id);renderState()});
+$('script').onclick=guard(async()=>{if(!await mayLeaveProject())return;await saving;const result=await api('/dialog/script',json('POST',{}));if(result.cancelled)return;project=result;chosen.clear();state=await api('/state');renderState();await loadProject(project.id);updateJob()});
 $('voice').onclick=guard(async()=>{await saving;const result=await api('/dialog/voice',json('POST',{}));if(result.cancelled)return;state.settings=result;renderState();if(project)syncProject(await api('/projects/'+project.id));message('共通マスターを保存しました')});
 $('masterFile').onclick=guard(async()=>{const result=await api('/dialog/master',json('POST',{}));if(result.path)$('masterPath').value=result.path});
 $('saveSettings').onclick=guard(async()=>{await saving;state.settings=await api('/settings',json('PUT',{reference:$('reference').value,duration_scale:Number($('defaultScale').value),normalize_numbers:$('normalizeNumbers').checked,wrap_subtitles:$('wrapSubtitles').checked}));renderState();if(project)syncProject(await api('/projects/'+project.id));message('設定を保存しました')});
@@ -207,7 +207,7 @@ async function exportRows(selectedOnly) {
   }
 };
 setInterval(showExportInfo, 1000);
-guard(async()=>{state=await api('/state');renderState();const last=localStorage.getItem('project');if(state.projects.some(p=>p.id===last))await loadProject(last);updateJob()})();
+guard(async()=>{state=await api('/state');renderState();const last=localStorage.getItem('project');if(state.projects.some(p=>p.id===last)){const opened=await api(`/projects/${last}/open-saved`,json('POST',{}));await loadProject(opened.id);renderState();}updateJob()})();
 setInterval(guard(async()=>{if(pollBusy||movingRows)return;pollBusy=true;try{const wasBusy=busy;const fresh=await api('/state');if(movingRows)return;state.job=fresh.job;updateJob();if(project&&(busy||wasBusy)){syncProject(await api('/projects/'+project.id));playback.refresh()}}finally{pollBusy=false}}),1800);
 
 async function persistProject(copyProject) {
@@ -216,12 +216,13 @@ async function persistProject(copyProject) {
   const result = await api(`/projects/${project.id}/save`, json('POST', {
     name: $('projectName').value, output_folder: $('output').value, copy_project: false, native_dialog: copyProject || !project.project_file
   }));
-  if (result.cancelled) return;
+  if (result.cancelled) return false;
   state = await api('/state');
   renderState();
   await loadProject(result.project.id);
   $('projectSaved').textContent = '保存済み：' + result.path;
   message('プロジェクトを保存しました');
+  return true;
 }
 $('saveProject').onclick = guard(() => persistProject(false));
 $('copyProject').onclick = guard(() => persistProject(true));
@@ -236,6 +237,7 @@ async function pickOutputFolder() {
 $('chooseOutput').onclick = guard(pickOutputFolder);
 
 $('openProject').onclick = guard(async () => {
+  if(!await mayLeaveProject())return;
   await saving;
   const result = await api('/projects/open-file', {method:'POST'});
   if (result.cancelled) return;
@@ -287,6 +289,7 @@ document.addEventListener('play', event => {
 }, true);
 
 async function createEmptyProject() {
+  if(!await mayLeaveProject())return;
   await saving;
   playback.stop();
   const created = await api('/projects/new', {method:'POST'});
@@ -386,3 +389,45 @@ $('registerMaster').onclick=guard(async()=>{
   $('masterName').value='';$('masterPath').value='';$('masterFile').value='';
   renderState();if(project)renderRows();message('マスターを登録しました');
 });
+
+let discardOnSwitch=null;
+let localProjectEdits=false;
+function updateSaveStatus(){
+  if(!project)return;
+  $('projectSaved').textContent=(project.dirty?'● 未保存の変更あり':'保存済み')+(project.project_file?'：'+project.project_file:'：名前を付けて保存してください');
+  $('autoSaveProject').disabled=busy||!project.project_file;
+  $('autoSaveProject').checked=project.autosave??false;
+}
+async function mayLeaveProject(){
+  if(!project)return true;
+  await saving;
+  const fresh=await api('/projects/'+project.id);
+  project.dirty=fresh.dirty||localProjectEdits;
+  if(project.dirty){
+    if(confirm('未保存の変更があります。保存してから切り替えますか？')){
+      if(!await persistProject(false))return false;
+    }else if(!confirm('未保存の変更を破棄して切り替えますか？'))return false;
+  }
+  discardOnSwitch=project.id;
+  return true;
+}
+$('autoSaveProject').onchange=guard(async()=>{
+  if(!project)return;
+  await saving;
+  const fresh=await api(`/projects/${project.id}/autosave`,json('PUT',{enabled:$('autoSaveProject').checked}));
+  Object.assign(project,{autosave:fresh.autosave,dirty:fresh.dirty});updateSaveStatus();
+});
+window.addEventListener('beforeunload',e=>{if(project&&(project.dirty||busy)){e.preventDefault();e.returnValue='';}});
+document.querySelector('main').addEventListener('input',e=>{if(project&&(e.target.closest('#rows')||['projectName','output','newRowText'].includes(e.target.id))){localProjectEdits=true;project.dirty=true;updateSaveStatus();}});
+let saveStatusPolling=false;
+setInterval(guard(async()=>{
+  if(!project||busy||movingRows||saveStatusPolling||document.activeElement?.matches('input,textarea'))return;
+  saveStatusPolling=true;
+  try{
+    await saving;const pid=project.id;
+    const fresh=await api('/projects/'+pid);
+    if(project?.id!==pid)return;
+    project.dirty=fresh.dirty||localProjectEdits;project.autosave=fresh.autosave;updateSaveStatus();
+    if(project.autosave&&project.dirty)await persistProject(false);
+  }finally{saveStatusPolling=false;}
+}),3000);

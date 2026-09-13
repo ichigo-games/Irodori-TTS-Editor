@@ -92,6 +92,41 @@ def apply_dictionary(text, entries):
                   lambda m: mapping[m.group()], text)
 
 
+HP_READINGS = {
+    '現在HP': 'ゲンザイエイチピー', 'HP割合': 'エイチピーワリアイ',
+    '低HP': 'テイエイチピー', '高HP': 'コウエイチピー', 'HP': 'エイチピー',
+}
+HP_PATTERN = re.compile(
+    r'(?<![A-Za-zＡ-Ｚａ-ｚ_])(?:現在[HＨ][PＰ]|[HＨ][PＰ]割合|[低高][HＨ][PＰ]|[HＨ][PＰ])(?![A-Za-zＡ-Ｚａ-ｚ_])',
+    re.IGNORECASE,
+)
+
+
+def normalize_hp(text):
+    def convert(part):
+        return HP_PATTERN.sub(lambda m: HP_READINGS[m[0].replace('Ｈ', 'H').replace('Ｐ', 'P')
+                                                    .replace('ｈ', 'H').replace('ｐ', 'P').replace('h', 'H').replace('p', 'P')], part)
+    # Leave URLs and file paths untouched, as with number normalization.
+    result, start = [], 0
+    for match in TOKENS.finditer(text):
+        if match['protected']:
+            result.extend((convert(text[start:match.start()]), match[0]))
+            start = match.end()
+    result.append(convert(text[start:]))
+    return ''.join(result)
+
+
 def normalize_for_tts(text: str, entries=(), *, normalize_numeric: bool = True) -> str:
-    text = apply_dictionary(text, entries)
+    # User readings are authoritative. Built-in HP conversion only touches unmatched text.
+    mapping = {e['word']: e['reading'] for e in entries if e['enabled'] and e['word']}
+    if mapping:
+        pattern = re.compile('|'.join(re.escape(k) for k in sorted(mapping, key=len, reverse=True)))
+        parts, start = [], 0
+        for match in pattern.finditer(text):
+            parts.extend((normalize_hp(text[start:match.start()]), mapping[match[0]]))
+            start = match.end()
+        parts.append(normalize_hp(text[start:]))
+        text = ''.join(parts)
+    else:
+        text = normalize_hp(text)
     return normalize_numbers(text) if normalize_numeric else text
