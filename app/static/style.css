@@ -56,7 +56,7 @@ main{flex:1;min-height:0;display:flex;flex-direction:column;padding:10px 16px}
 #panelEditor #togglePlayback{padding:5px 8px}
 #panelEditor>.toolbar{flex-wrap:nowrap}
 #playbackStatus{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
-#newRowText{min-width:80px}
+#newRowText{min-width:80px;min-height:2.6em;max-height:6em;resize:vertical;line-height:1.4;font-family:inherit}
 #exportInfo{flex:none;margin:0;max-height:50px;overflow:auto}
 #projectSaved{display:block;flex:none;margin:2px 0 6px;max-height:36px;overflow:auto}
 th{padding:8px}td{padding:6px 8px}

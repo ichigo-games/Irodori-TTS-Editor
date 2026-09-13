@@ -27,3 +27,6 @@ Irodori-TTS-Editor.code-workspace
 .pytest_cache/
 .ruff_cache/
 *.py[cod]
+
+# Local Claude Code dev-server launch config
+/.claude/

@@ -690,25 +690,34 @@ def new_project():
         return p
 
 
-class AddRow(BaseModel):
-    text: str = Field(min_length=1, max_length=10000)
+class AddRows(BaseModel):
+    text: str = Field(min_length=1, max_length=50000)
+    before_id: int | None = None
 
 
 @app.post('/api/projects/{pid}/rows')
-def add_row(pid: str, value: AddRow):
+def add_row(pid: str, value: AddRows):
     with lock:
         idle()
-        text = value.text.strip()
-        if not text:
+        lines = [line.strip() for line in value.text.splitlines() if line.strip()]
+        if not lines:
             raise HTTPException(400, '追加するセリフを入力してください')
         p = load_project(pid)
-        n = len(p['rows']) + 1
-        p['rows'].append(dict(id=n, pause_ms=0, source_line=None, original_text=text,
-                             subtitle_text=text, speech_text=text,
-                             duration_scale=settings['duration_scale'], seed=None,
-                             used_seed=None, status='pending', wav=None, error='', style=None))
+        rows = p['rows']
+        if value.before_id is not None and not any(r['id'] == value.before_id for r in rows):
+            raise HTTPException(400, '挿入先の行がありません')
+        new_rows = [dict(id=0, pause_ms=0, source_line=None, original_text=text,
+                          subtitle_text=text, speech_text=text,
+                          duration_scale=settings['duration_scale'], seed=None,
+                          used_seed=None, status='pending', wav=None, error='', style=None)
+                    for text in lines]
+        start_index = len(rows) if value.before_id is None else next(
+            i for i, r in enumerate(rows) if r['id'] == value.before_id)
+        p['rows'] = rows[:start_index] + new_rows + rows[start_index:]
+        for i, row in enumerate(p['rows'], 1):
+            row['id'] = i
         atomic_json(project_path(pid), p)
-        return {'id': n}
+        return {'ids': list(range(start_index + 1, start_index + 1 + len(new_rows)))}
 
 
 @app.get('/api/projects/{pid}')

@@ -125,7 +125,7 @@ function previewAudioUrl(variant){
 }
 $('ppPlayBefore').onclick=guard(()=>{const audio=$('ppPreviewAudio');audio.src=previewAudioUrl('raw');audio.play()});
 $('ppPlayAfter').onclick=guard(()=>{const audio=$('ppPreviewAudio');audio.src=previewAudioUrl('processed');audio.play()});
-function updateJob(){const j=state.job;busy=j.running;$('stopGeneration').disabled=!busy||j.stop_requested;$('stopGeneration').textContent=j.stop_requested?'現在行の完了後に停止…':'生成を中断';if(j.fatal_error)message('生成処理が停止しました: '+j.fatal_error,true);$('progress').max=j.total||1;$('progress').value=j.done;$('progressText').textContent=j.running?`${j.done} / ${j.total} 完了・No.${j.current??'—'} 生成中（初回はモデルをロード）`:(j.total?`${j.done} / ${j.total} 完了・エラー ${j.errors} 行`:project?`${project.rows.length} セリフ`:'台本を読み込んでください');for(const id of ['registerMaster','masterName','masterPath','masterFile','missing','selected','all','applyScale','applyPause','bulkScale','bulkPause','saveSettings','normalizeNumbers','wrapSubtitles','savePostProcessing','ppEnabled','eqEnabled','eqPreset','eqFrequency','eqGain','eqQ','peakEnabled','peakDbfs','ppPreviewRow','ppPlayBefore','ppPlayAfter','saveDictionary','addWord','script','voice','projects','newProject','addRow','newRowText','export','exportMode','saveProject','copyProject','projectName','chooseOutput','openProject'])$(id).disabled=busy;document.querySelectorAll('#dictionary input,#dictionary button,#masterList button').forEach(e=>e.disabled=busy||e.dataset.inUse==='true');for(const id of ['eqFrequency','eqGain','eqQ'])$(id).disabled=busy||$('eqPreset').value!=='custom'}
+function updateJob(){const j=state.job;busy=j.running;$('stopGeneration').disabled=!busy||j.stop_requested;$('stopGeneration').textContent=j.stop_requested?'現在行の完了後に停止…':'生成を中断';if(j.fatal_error)message('生成処理が停止しました: '+j.fatal_error,true);$('progress').max=j.total||1;$('progress').value=j.done;$('progressText').textContent=j.running?`${j.done} / ${j.total} 完了・No.${j.current??'—'} 生成中（初回はモデルをロード）`:(j.total?`${j.done} / ${j.total} 完了・エラー ${j.errors} 行`:project?`${project.rows.length} セリフ`:'台本を読み込んでください');for(const id of ['registerMaster','masterName','masterPath','masterFile','missing','selected','all','applyScale','applyPause','bulkScale','bulkPause','saveSettings','normalizeNumbers','wrapSubtitles','savePostProcessing','ppEnabled','eqEnabled','eqPreset','eqFrequency','eqGain','eqQ','peakEnabled','peakDbfs','ppPreviewRow','ppPlayBefore','ppPlayAfter','saveDictionary','addWord','script','voice','projects','newProject','addRow','addRowAfterSelection','newRowText','export','exportMode','saveProject','copyProject','projectName','chooseOutput','openProject'])$(id).disabled=busy;document.querySelectorAll('#dictionary input,#dictionary button,#masterList button').forEach(e=>e.disabled=busy||e.dataset.inUse==='true');for(const id of ['eqFrequency','eqGain','eqQ'])$(id).disabled=busy||$('eqPreset').value!=='custom'}
 async function startGeneration(mode,ids){playback.stop();await saving;await api(`/projects/${project.id}/generate`,json('POST',{mode,ids,seed_mode:$('seedMode').value}));state=await api('/state');updateJob();syncProject(await api('/projects/'+project.id))}
 $('projects').onchange=guard(async e=>{const next=e.target.value;if(!next)return;if(!await mayLeaveProject()){$('projects').value=project?.id??'';return;}const opened=await api(`/projects/${next}/open-saved`,json('POST',{}));await loadProject(opened.id);renderState()});
 $('script').onclick=guard(async()=>{if(!await mayLeaveProject())return;await saving;const result=await api('/dialog/script',json('POST',{}));if(result.cancelled)return;project=result;chosen.clear();state=await api('/state');renderState();await loadProject(project.id);updateJob()});
@@ -300,25 +300,37 @@ async function createEmptyProject() {
 }
 $('newProject').onclick = guard(createEmptyProject);
 let addingRow = false;
-$('addRow').onclick = guard(async () => {
+async function addRows(beforeId) {
   if (addingRow || busy) return;
-  const text = $('newRowText').value.trim();
-  if (!text) throw Error('追加するセリフを入力してください');
+  const text = $('newRowText').value;
+  if (!text.trim()) throw Error('追加するセリフを入力してください');
   addingRow = true;
   try {
     await saving;
     if (!project) await createEmptyProject();
-    const added = await api(`/projects/${project.id}/rows`, json('POST', {text}));
+    const added = await api(`/projects/${project.id}/rows`, json('POST', {text, before_id: beforeId}));
     project = await api('/projects/' + project.id);
     renderRows();
     $('newRowText').value = '';
     $('newRowText').focus();
-    $('rows').lastElementChild?.scrollIntoView({block:'nearest'});
-    message(`No.${added.id} を追加しました。字幕と読み上げは行内で個別に編集できます。`);
+    const first = added.ids[0], last = added.ids[added.ids.length - 1];
+    document.querySelector(`#rows tr[data-row-id="${first}"]`)?.scrollIntoView({block:'nearest'});
+    message(added.ids.length > 1
+      ? `No.${first}〜No.${last} を${added.ids.length}行追加しました。字幕と読み上げは行内で個別に編集できます。`
+      : `No.${first} を追加しました。字幕と読み上げは行内で個別に編集できます。`);
   } finally { addingRow = false; }
+}
+$('addRow').onclick = guard(() => addRows(null));
+$('addRowAfterSelection').onclick = guard(() => {
+  if (!project) throw Error('台本を読み込んでください');
+  if (!chosen.size) throw Error('挿入する位置の行を選択してください');
+  const ids = project.rows.map(r => r.id);
+  const lastSelectedIndex = Math.max(...ids.map((id, i) => chosen.has(id) ? i : -1));
+  const beforeId = lastSelectedIndex + 1 < ids.length ? ids[lastSelectedIndex + 1] : null;
+  return addRows(beforeId);
 });
 $('newRowText').addEventListener('keydown', event => {
-  if (event.key === 'Enter' && !event.isComposing && event.keyCode !== 229) {
+  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.isComposing && event.keyCode !== 229) {
     event.preventDefault();
     $('addRow').click();
   }
