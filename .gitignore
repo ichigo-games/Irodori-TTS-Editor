@@ -30,3 +30,4 @@ Irodori-TTS-Editor.code-workspace
 
 # Local Claude Code dev-server launch config
 /.claude/
+/environments/

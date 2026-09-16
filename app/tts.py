@@ -4,6 +4,16 @@ import sys
 from pathlib import Path
 
 
+def resolve_checkpoint(download):
+    local = os.environ.get('IRODORI_CHECKPOINT')
+    if local:
+        path = Path(local)
+        if not path.is_file():
+            raise FileNotFoundError(f'固定モデルが見つかりません: {path}')
+        return str(path)
+    return str(download(os.environ.get('IRODORI_HF_CHECKPOINT', 'Aratako/Irodori-TTS-v4.1-Small')))
+
+
 class IrodoriEngine:
     def __init__(self):
         self.runtime = None
@@ -18,7 +28,7 @@ class IrodoriEngine:
         )
         if self.runtime is None:
             self.runtime = InferenceRuntime.from_key(RuntimeKey(
-                checkpoint=str(download_hf_checkpoint('Aratako/Irodori-TTS-v4.1-Small')),
+                checkpoint=resolve_checkpoint(download_hf_checkpoint),
                 model_device='cuda', codec_device='cuda',
             ))
         result = self.runtime.synthesize(SamplingRequest(

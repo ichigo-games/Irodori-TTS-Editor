@@ -20,8 +20,10 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.concurrency import run_in_threadpool
 
 from app import working_sessions
+from app.shared_library import read_library, PREFIX as SHARED_PREFIX
 from app.project_management import store_voice, migrate_references, move_project
 from app.tts import IrodoriEngine
 from app.audio_output import output_audio
@@ -32,6 +34,9 @@ from app.project_files import write_project_file, read_project_file
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = Path(os.environ.get('EDITOR_DATA', ROOT))
+SHARED_DATA = Path(os.environ['EDITOR_SHARED_DATA']).resolve() if os.environ.get('EDITOR_SHARED_DATA') else None
+if SHARED_DATA and SHARED_DATA == DATA.resolve():
+    raise RuntimeError('共有元と試用版のデータ保存先は分けてください')
 for folder in ('projects', 'voices', 'dictionaries', 'outputs'):
     (DATA / folder).mkdir(parents=True, exist_ok=True)
 
@@ -40,7 +45,19 @@ def read_json(path, default):
     return json.loads(path.read_text('utf-8')) if path.exists() else default
 
 
+def protect_shared_destination(path):
+    target = Path(path).resolve()
+    local = DATA.resolve()
+    if SHARED_DATA and (target == SHARED_DATA or SHARED_DATA in target.parents) and not (
+        target == local or local in target.parents
+    ):
+        raise HTTPException(403, '通常版の共有元には保存できません。試用版の保存先を指定してください。')
+
+
 def atomic_json(path, data, mark_dirty=True):
+    protect_shared_destination(path)
+    if SHARED_DATA and path == DATA / 'settings.json':
+        data = {**data, 'masters': [m for m in data.get('masters', []) if not m.get('shared')]}
     if mark_dirty and path.name == 'project.json' and working_sessions.ROOT in path.resolve().parents:
         data['dirty'] = True
     tmp = path.with_suffix('.tmp')
@@ -104,7 +121,7 @@ def decode_csv_script(data):
             pause = values.get('pause_ms', '').strip()
             if pause and (not re.fullmatch(r'[0-9]+', pause) or len(pause) > 5 or int(pause) > 60000):
                 raise HTTPException(400, f'CSV {source}行目: 末尾無音msは0〜60000の整数です')
-            rows.append((source, text, masters.get(name.casefold()) if name else None, int(pause) if pause else 0))
+            rows.append((source, text, masters.get(name.casefold()) if name else None, int(pause) if pause else settings['default_pause_ms']))
     except csv.Error as exc:
         raise HTTPException(400, f'CSV {reader.line_num}行目付近の書式が不正です: {exc}') from exc
     return rows
@@ -124,11 +141,36 @@ settings = read_json(DATA / 'settings.json', {'reference': '', 'duration_scale':
 settings.setdefault('normalize_numbers', True)
 settings.setdefault('wrap_subtitles', True)
 settings.setdefault('masters', [])
+settings.setdefault('default_pause_ms', 200)
 settings.setdefault('post_processing', dict(DEFAULT_POST_PROCESSING))
 dictionary = read_json(DATA / 'dictionaries' / 'reading.json', [])
 job = {'running': False, 'done': 0, 'total': 0, 'errors': 0, 'current': None, 'project': None}
 app = FastAPI(title='Irodori TTS Editor')
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=['127.0.0.1', 'localhost', 'testserver'])
+
+
+def refresh_shared_library():
+    with lock:
+        if SHARED_DATA and not job['running']:
+            masters, entries = read_library(SHARED_DATA)
+            settings['masters'] = [m for m in settings['masters'] if not m.get('shared')] + masters
+            dictionary[:] = entries
+
+
+def require_local_library(mid=None):
+    if SHARED_DATA and (mid is None or mid.startswith(SHARED_PREFIX)):
+        raise HTTPException(403, '共有辞書・マスターは読み取り専用です。通常版で編集してください。')
+
+
+@app.middleware('http')
+async def shared_library_view(request, call_next):
+    try:
+        if SHARED_DATA:
+            await run_in_threadpool(refresh_shared_library)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        from fastapi.responses import JSONResponse
+        return JSONResponse({'detail': f'通常版の共有データを読み込めません: {exc}'}, status_code=503)
+    return await call_next(request)
 
 
 @app.middleware('http')
@@ -195,6 +237,7 @@ def invalidate_reference(reference=None):
 
 
 class Settings(BaseModel):
+    default_pause_ms: int = Field(200, ge=0, le=60000, strict=True)
     wrap_subtitles: bool = True
     normalize_numbers: bool = True
     reference: str
@@ -228,6 +271,7 @@ class Master(BaseModel):
 
 @app.post('/api/masters')
 def register_master(value: Master):
+    require_local_library()
     with lock:
         idle()
         name = value.name.strip()
@@ -246,6 +290,7 @@ def register_master(value: Master):
 
 @app.post('/api/masters/upload')
 def upload_master(file: UploadFile, name: str = Form(...)):
+    require_local_library()
     with lock:
         idle()
         if not (file.filename or '').lower().endswith('.wav'):
@@ -284,6 +329,7 @@ class MasterName(BaseModel):
 
 @app.put('/api/masters/{mid}')
 def rename_master(mid: str, value: MasterName):
+    require_local_library(mid)
     with lock:
         idle()
         master = next((m for m in settings['masters'] if m['id'] == mid), None)
@@ -299,6 +345,7 @@ def rename_master(mid: str, value: MasterName):
 
 @app.delete('/api/masters/{mid}')
 def delete_master(mid: str):
+    require_local_library(mid)
     with lock:
         idle()
         master = next((m for m in settings['masters'] if m['id'] == mid), None)
@@ -476,6 +523,7 @@ def save_project(pid: str, value: ProjectSave):
         target = selected or (p.get('project_file') if not value.copy_project else None)
         if target:
             target = Path(target).resolve()
+            protect_shared_destination(target)
             engine_home = Path(os.environ.get('IRODORI_HOME', r'E:\Irodori-TTS')).resolve()
             if engine_home == target or engine_home in target.parents or target.suffix.lower() != '.irodori':
                 raise HTTPException(400, 'Irodori本体の外に .irodori ファイルとして保存してください')
@@ -611,7 +659,7 @@ def restore_project(pid: str):
 def state():
     with lock:
         projects = [read_json(p, {}) for p in (DATA / 'projects').glob('*/project.json')]
-        return {'settings': settings, 'dictionary': dictionary, 'job': copy.deepcopy(job),
+        return {'settings': settings, 'dictionary': dictionary, 'shared_library': bool(SHARED_DATA), 'job': copy.deepcopy(job),
                 'projects': [{'id': p['id'], 'name': p['name']} for p in projects]}
 
 
@@ -623,7 +671,7 @@ def save_settings(value: Settings):
             raise HTTPException(400, 'Reference Audioが見つかりません')
         if value.reference != settings.get('reference'):
             settings.pop('reference_original_name', None)
-        settings.update(value.model_dump())
+        settings.update(value.model_dump(exclude={'default_pause_ms'} if 'default_pause_ms' not in value.model_fields_set else set()))
         atomic_json(DATA / 'settings.json', settings)
         invalidate_reference(settings['reference'])
         return settings
@@ -647,6 +695,7 @@ def upload_reference(file: UploadFile):
 
 @app.put('/api/dictionary')
 def save_dictionary(entries: list[Entry]):
+    require_local_library()
     with lock:
         idle()
         if len({e.word for e in entries}) != len(entries):
@@ -667,7 +716,7 @@ def create_project(file: UploadFile):
     with lock:
         idle()
         data = file.file.read()
-        lines = decode_csv_script(data) if (file.filename or '').lower().endswith('.csv') else [(source, text, None, 200) for source, text in decode_script(data)]
+        lines = decode_csv_script(data) if (file.filename or '').lower().endswith('.csv') else [(source, text, None, settings['default_pause_ms']) for source, text in decode_script(data)]
         if not lines:
             raise HTTPException(400, '台本にセリフがありません')
         pid = uuid.uuid4().hex
@@ -928,6 +977,7 @@ def export(pid: str, value: Export):
         if any(r['status'] != 'generated' for r in rows):
             raise HTTPException(400, '出力対象の未生成・変更あり・エラー行を生成してから出力してください')
         parent = Path(value.folder).expanduser().resolve() if value.folder else DATA / 'outputs'
+        protect_shared_destination(parent)
         engine_home = Path(os.environ.get('IRODORI_HOME', r'E:\Irodori-TTS')).resolve()
         if parent == engine_home or engine_home in parent.parents:
             raise HTTPException(400, 'Irodori-TTS本体のフォルダには出力できません')

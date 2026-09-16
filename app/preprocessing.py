@@ -26,6 +26,27 @@ def integer_reading(n: int) -> str:
     return result + (DIGITS[n] if n else '')
 
 
+KANJI_DIGITS = '零一二三四五六七八九'
+NUMBER_WIDTH = str.maketrans('０１２３４５６７８９，．', '0123456789,.')
+
+
+def integer_kanji(n: int) -> str:
+    if not 0 <= n <= MAX_NUMBER:
+        raise ValueError('Supported integers: 0..999999999')
+    if n == 0:
+        return KANJI_DIGITS[0]
+    result = ''
+    for unit, label in ((100_000_000, '億'), (10_000, '万')):
+        group, n = divmod(n, unit)
+        if group:
+            result += integer_kanji(group) + label
+    for unit, label in ((1000, '千'), (100, '百'), (10, '十')):
+        digit, n = divmod(n, unit)
+        if digit:
+            result += (KANJI_DIGITS[digit] if digit != 1 else '') + label
+    return result + (KANJI_DIGITS[n] if n else '')
+
+
 def contract(reading, endings):
     for old, new in endings.items():
         if reading.endswith(old):
@@ -41,16 +62,17 @@ COUNTERS = {
     '章': ('しょう', {'いち': 'いっ', 'はち': 'はっ', 'じゅう': 'じゅっ'}),
     '人': ('にん', {'よん': 'よ'}),
 }
-NUMBER = r'[0-9]+(?:[,.][0-9]+)*'
+NUMBER = r'[0-9０-９]+(?:[,.，．][0-9０-９]+)*'
 # One pass: protected spans are emitted unchanged, never fed back to replacements.
 TOKENS = re.compile(
     r'(?P<protected>https?://[^\s<>「」]+|www\.[^\s<>「」]+'
     r'|(?:[A-Za-z]:[\\/]|\\\\|\.{0,2}/)[^\s<>「」、]+'
     r'|[^\s/\\<>「」、]+\.(?:wav|txt|mp3|json|irodori|py|png|jpg|csv|exe|zip)\b)'
-    r'|(?P<level>(?<![A-Za-z0-9_])(?i:lv)(?P<lvnum>[0-9]+)(?![A-Za-z0-9_]))'
-    r'|(?P<ordinal>第(?P<ordnum>[0-9]+)章)'
-    r'|(?P<identifier>[A-Za-z_][A-Za-z0-9_.-]*(?:[ \t]+[0-9]+(?:\.[0-9]+)*)?|[0-9]+[A-Za-z_][A-Za-z0-9_.-]*)'
-    r'|(?P<numeric>' + NUMBER + r')(?P<suffix>ターン|体|回|人|個|[%％])?'
+    r'|(?P<label>(?<![A-Za-zＡ-Ｚａ-ｚ0-9０-９_])(?P<prefix>[lLｌＬ][vVｖＶ]|[sSｓＳ]|スキル|パッシブ|レベル)'
+    r'(?P<labelnum>' + NUMBER + r')(?![A-Za-zＡ-Ｚａ-ｚ0-9０-９_.．-]))'
+    r'|(?P<ordinal>第(?P<ordnum>[0-9０-９]+)章)'
+    r'|(?P<identifier>[A-Za-zＡ-Ｚａ-ｚ_][A-Za-zＡ-Ｚａ-ｚ0-9０-９_.．-]*(?:[ \t]+[0-9０-９]+(?:[.．][0-9０-９]+)*)?|[0-9０-９]+[A-Za-zＡ-Ｚａ-ｚ_][A-Za-zＡ-Ｚａ-ｚ0-9０-９_.．-]*)'
+    r'|(?P<numeric>' + NUMBER + r')(?P<suffix>ターン|体|回|人|個|倍|ダメージ|[%％])?'
 )
 
 
@@ -58,7 +80,7 @@ def normalize_numbers(text: str) -> str:
     def replace(match):
         if match['protected'] or match['identifier']:
             return match[0]
-        raw = match['lvnum'] or match['ordnum'] or match['numeric']
+        raw = (match['labelnum'] or match['ordnum'] or match['numeric']).translate(NUMBER_WIDTH)
         if not re.fullmatch(r'(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)(?:\.[0-9]+)?', raw):
             return match[0]
         whole, dot, fraction = raw.replace(',', '').partition('.')
@@ -66,9 +88,11 @@ def normalize_numbers(text: str) -> str:
             return match[0]
         n = int(whole)
         reading = integer_reading(n)
-        if match['level']:
-            return 'れべる' + reading
+        if match['label']:
+            return match['prefix'] + integer_kanji(n) if not dot else match[0]
         suffix = '章' if match['ordinal'] else match['suffix']
+        if not dot and suffix and not match['ordinal']:
+            return integer_kanji(n) + suffix
         if dot:
             if suffix in COUNTERS:
                 return match[0]  # Fractional counters need separate language rules.
@@ -80,7 +104,7 @@ def normalize_numbers(text: str) -> str:
                 return {1: 'ひとり', 2: 'ふたり'}[n]
             ending, irregular = COUNTERS[suffix]
             reading = contract(reading, irregular) + ending
-        return ('だい' if match['ordinal'] else '') + reading
+        return ('だい' if match['ordinal'] else '') + reading + (suffix if suffix in ('倍', 'ダメージ') else '')
     return TOKENS.sub(replace, text)
 
 

@@ -3,6 +3,7 @@ import tempfile
 import threading
 import time
 import unittest
+import wave
 from unittest.mock import patch
 from pathlib import Path
 
@@ -21,7 +22,11 @@ class FakeEngine:
         self.calls.append((text, scale, seed))
         if text == '失敗' and self.fail:
             raise RuntimeError('injected failure')
-        Path(path).write_bytes(b'RIFF-test')
+        with wave.open(str(path), 'wb') as audio:
+            audio.setnchannels(1)
+            audio.setsampwidth(2)
+            audio.setframerate(24000)
+            audio.writeframes(b'\x00\x00' * 240)
         return seed
 
 
@@ -32,7 +37,7 @@ class EditorTests(unittest.TestCase):
         m.dictionary.clear()
         reference = Path(temp.name) / 'reference.wav'
         reference.write_bytes(b'test')
-        self.c.put('/api/settings', json={'reference': str(reference), 'duration_scale': 1})
+        self.c.put('/api/settings', json={'reference': str(reference), 'duration_scale': 1, 'default_pause_ms': 200})
 
     def create(self, text='LR5\n失敗\n\n最後'):
         r = self.c.post('/api/projects', files={'file': ('sample.txt', text.encode('cp932'))})
@@ -119,7 +124,7 @@ class EditorTests(unittest.TestCase):
 
     def test_headerless_csv(self):
         for content, expected in [('こんにちは,共通マスター,350\n,共通マスター,350\n次の行,,500', [('こんにちは',350),('次の行',500)]),
-                                  ('こんにちは\n次の行', [('こんにちは',0),('次の行',0)]),
+                                  ('こんにちは\n次の行', [('こんにちは',200),('次の行',200)]),
                                   ('セリフ,マスター,末尾無音ms\nこんにちは,,350', [('こんにちは',350)])]:
             result = self.c.post('/api/projects', files={'file': ('script.csv', content.encode('utf-8'))})
             self.assertEqual(result.status_code, 200, result.text)
@@ -328,7 +333,7 @@ class EditorTests(unittest.TestCase):
         response = self.c.post('/api/projects', files={'file': ('pause.csv', 'セリフ,マスター,末尾無音ms\n通常,共通マスター,200\n次,,'.encode())})
         self.assertEqual(response.status_code, 200, response.text)
         pid = response.json()['id']
-        self.assertEqual([r['pause_ms'] for r in response.json()['rows']], [200, 0])
+        self.assertEqual([r['pause_ms'] for r in response.json()['rows']], [200, 200])
         self.c.post(f'/api/projects/{pid}/generate', json={'mode': 'all'})
         self.wait()
         row = m.load_project(pid)['rows'][0]
@@ -502,7 +507,7 @@ class EditorTests(unittest.TestCase):
         source = '3ターンの間、攻撃力が30%増加する'
         pid = self.create(source)
         row = self.c.get(f'/api/projects/{pid}').json()['rows'][0]
-        expected = 'さんたーんの間、攻撃力がさんじゅっぱーせんと増加する'
+        expected = '三ターンの間、攻撃力が三十%増加する'
         self.assertEqual(row['preview'], expected)
         self.c.post(f'/api/projects/{pid}/generate', json={'mode':'all'})
         self.wait()
@@ -686,7 +691,7 @@ class PostProcessingTests(unittest.TestCase):
         m.settings['post_processing'] = dict(DEFAULT_PP)
         reference = Path(temp.name) / 'pp-reference.wav'
         reference.write_bytes(b'test')
-        self.c.put('/api/settings', json={'reference': str(reference), 'duration_scale': 1})
+        self.c.put('/api/settings', json={'reference': str(reference), 'duration_scale': 1, 'default_pause_ms': 200})
 
     def wait(self):
         deadline = time.monotonic() + 5
