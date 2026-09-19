@@ -258,16 +258,25 @@ $('export').onclick = () => exportRows($('exportMode').value === 'selected');
 $('generateMissingAndExport').onclick = guard(async () => {
   if (!project) throw Error('台本を読み込んでください');
   if (busy) throw Error('生成中です。完了後にお試しください');
-  if (project.rows.some(r => r.status !== 'generated')) {
-    await startGeneration('missing', []);
+  if (!project.rows.length) throw Error('セリフがありません');
+  // Decide the output folder up front so a long generation run never ends in a folder prompt.
+  if (!$('output').value.trim() && !await pickOutputFolder()) return;
+
+  const alreadyGenerated = project.rows.filter(r => r.status === 'generated').map(r => r.id);
+  if (alreadyGenerated.length) await exportRows(false, alreadyGenerated);
+
+  const missingIds = project.rows.filter(r => r.status !== 'generated').map(r => r.id);
+  for (const rowId of missingIds) {
+    await startGeneration('selected', [rowId]);
     while (state.job.running) {
       await new Promise(resolve => setTimeout(resolve, 500));
       state.job = (await api('/state')).job;
       updateJob();
     }
-    syncProject(await api('/projects/' + project.id));
+    project = await api('/projects/' + project.id);
+    const row = project.rows.find(r => r.id === rowId);
+    if (row && row.status === 'generated') await exportRows(false, [rowId]);
   }
-  await exportRows(false);
 });
 const playback = new PlaybackQueue($('continuousAudio'),
   text => $('playbackStatus').textContent = text,
