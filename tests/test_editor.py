@@ -602,6 +602,8 @@ class EditorTests(unittest.TestCase):
         self.assertEqual(rows[4]['wav'], wav_three)
         self.assertEqual(rows[3]['status'], 'generated')
         self.assertEqual(rows[1]['status'], 'pending')
+        # Rows typed directly in the editor get the same default trailing silence as script import.
+        self.assertEqual([r['pause_ms'] for r in rows], [m.settings['default_pause_ms']] * 5)
 
         self.assertEqual(self.c.post(f'/api/projects/{pid}/rows', json={'text': '末尾'}).json()['ids'], [6])
         self.assertEqual(self.c.get(f'/api/projects/{pid}').json()['rows'][-1]['speech_text'], '末尾')

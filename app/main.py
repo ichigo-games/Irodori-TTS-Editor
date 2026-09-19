@@ -759,7 +759,7 @@ def add_row(pid: str, value: AddRows):
         rows = p['rows']
         if value.before_id is not None and not any(r['id'] == value.before_id for r in rows):
             raise HTTPException(400, '挿入先の行がありません')
-        new_rows = [dict(id=0, pause_ms=0, source_line=None, original_text=text,
+        new_rows = [dict(id=0, pause_ms=settings['default_pause_ms'], source_line=None, original_text=text,
                           subtitle_text=text, speech_text=text,
                           duration_scale=settings['duration_scale'], seed=None,
                           used_seed=None, status='pending', wav=None, error='', style=None)
