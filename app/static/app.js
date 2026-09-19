@@ -126,7 +126,7 @@ function previewAudioUrl(variant){
 }
 $('ppPlayBefore').onclick=guard(()=>{const audio=$('ppPreviewAudio');audio.src=previewAudioUrl('raw');audio.play()});
 $('ppPlayAfter').onclick=guard(()=>{const audio=$('ppPreviewAudio');audio.src=previewAudioUrl('processed');audio.play()});
-function updateJob(){const j=state.job;busy=j.running;$('stopGeneration').disabled=!busy||j.stop_requested;$('stopGeneration').textContent=j.stop_requested?'現在行の完了後に停止…':'生成を中断';if(j.fatal_error)message('生成処理が停止しました: '+j.fatal_error,true);$('progress').max=j.total||1;$('progress').value=j.done;$('progressText').textContent=j.running?`${j.done} / ${j.total} 完了・No.${j.current??'—'} 生成中（初回はモデルをロード）`:(j.total?`${j.done} / ${j.total} 完了・エラー ${j.errors} 行`:project?`${project.rows.length} セリフ`:'台本を読み込んでください');for(const id of ['registerMaster','masterName','masterPath','masterFile','missing','selected','all','applyScale','applyPause','bulkScale','bulkPause','saveSettings','defaultPause','normalizeNumbers','wrapSubtitles','savePostProcessing','ppEnabled','eqEnabled','eqPreset','eqFrequency','eqGain','eqQ','peakEnabled','peakDbfs','ppPreviewRow','ppPlayBefore','ppPlayAfter','saveDictionary','addWord','script','voice','projects','newProject','addRow','addRowAfterSelection','newRowText','export','exportMode','saveProject','copyProject','projectName','chooseOutput','openProject'])$(id).disabled=busy;document.querySelectorAll('#dictionary input,#dictionary button,#masterList button').forEach(e=>e.disabled=busy||e.dataset.inUse==='true');for(const id of ['eqFrequency','eqGain','eqQ'])$(id).disabled=busy||$('eqPreset').value!=='custom';applySharedReadOnly()}
+function updateJob(){const j=state.job;busy=j.running;$('stopGeneration').disabled=!busy||j.stop_requested;$('stopGeneration').textContent=j.stop_requested?'現在行の完了後に停止…':'生成を中断';if(j.fatal_error)message('生成処理が停止しました: '+j.fatal_error,true);$('progress').max=j.total||1;$('progress').value=j.done;$('progressText').textContent=j.running?`${j.done} / ${j.total} 完了・No.${j.current??'—'} 生成中（初回はモデルをロード）`:(j.total?`${j.done} / ${j.total} 完了・エラー ${j.errors} 行`:project?`${project.rows.length} セリフ`:'台本を読み込んでください');for(const id of ['registerMaster','masterName','masterPath','masterFile','missing','selected','all','applyScale','applyPause','bulkScale','bulkPause','saveSettings','defaultPause','normalizeNumbers','wrapSubtitles','savePostProcessing','ppEnabled','eqEnabled','eqPreset','eqFrequency','eqGain','eqQ','peakEnabled','peakDbfs','ppPreviewRow','ppPlayBefore','ppPlayAfter','saveDictionary','addWord','script','voice','projects','newProject','addRow','addRowAfterSelection','newRowText','export','exportMode','saveProject','copyProject','projectName','chooseOutput','openProject','generateMissingAndExport'])$(id).disabled=busy;document.querySelectorAll('#dictionary input,#dictionary button,#masterList button').forEach(e=>e.disabled=busy||e.dataset.inUse==='true');for(const id of ['eqFrequency','eqGain','eqQ'])$(id).disabled=busy||$('eqPreset').value!=='custom';applySharedReadOnly()}
 async function startGeneration(mode,ids){playback.stop();await saving;await api(`/projects/${project.id}/generate`,json('POST',{mode,ids,seed_mode:$('seedMode').value}));state=await api('/state');updateJob();syncProject(await api('/projects/'+project.id))}
 $('projects').onchange=guard(async e=>{const next=e.target.value;if(!next)return;if(!await mayLeaveProject()){$('projects').value=project?.id??'';return;}const opened=await api(`/projects/${next}/open-saved`,json('POST',{}));await loadProject(opened.id);renderState()});
 $('script').onclick=guard(async()=>{if(!await mayLeaveProject())return;await saving;const result=await api('/dialog/script',json('POST',{}));if(result.cancelled)return;state=await api('/state');await loadProject(result.id);renderState();updateJob()});
@@ -255,6 +255,20 @@ $('openProject').onclick = guard(async () => {
 });
 
 $('export').onclick = () => exportRows($('exportMode').value === 'selected');
+$('generateMissingAndExport').onclick = guard(async () => {
+  if (!project) throw Error('台本を読み込んでください');
+  if (busy) throw Error('生成中です。完了後にお試しください');
+  if (project.rows.some(r => r.status !== 'generated')) {
+    await startGeneration('missing', []);
+    while (state.job.running) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+      state.job = (await api('/state')).job;
+      updateJob();
+    }
+    syncProject(await api('/projects/' + project.id));
+  }
+  await exportRows(false);
+});
 const playback = new PlaybackQueue($('continuousAudio'),
   text => $('playbackStatus').textContent = text,
   id => {

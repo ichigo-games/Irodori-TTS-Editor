@@ -48,7 +48,7 @@ main{flex:1;min-height:0;display:flex;flex-direction:column;padding:10px 16px}
 #panelEditor>.tablewrap{flex:1;min-height:0;max-height:none}
 #panelDictionary,#panelSettings,#panelBulk{flex:1;min-height:0;overflow:auto}
 .command-bar{flex-wrap:nowrap;overflow-x:auto;padding-bottom:2px!important}
-.command-bar>label{flex:1 1 260px;min-width:160px;max-width:none}
+.command-bar>label{flex:1 1 160px;min-width:110px;max-width:none}
 .command-bar #output{min-width:70px;width:100%}
 .command-bar>button,.command-bar>select{flex-shrink:0}
 .command-divider{height:24px;border-left:1px solid #435466;margin:0 5px}
