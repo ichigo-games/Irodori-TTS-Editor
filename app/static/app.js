@@ -339,16 +339,24 @@ async function addRows(beforeId) {
     message(added.ids.length > 1
       ? `No.${first}〜No.${last} を${added.ids.length}行追加しました。字幕と読み上げは行内で個別に編集できます。`
       : `No.${first} を追加しました。字幕と読み上げは行内で個別に編集できます。`);
+    return added.ids;
   } finally { addingRow = false; }
 }
 $('addRow').onclick = guard(() => addRows(null));
-$('addRowAfterSelection').onclick = guard(() => {
+$('addRowAfterSelection').onclick = guard(async () => {
   if (!project) throw Error('台本を読み込んでください');
   if (!chosen.size) throw Error('挿入する位置の行を選択してください');
   const ids = project.rows.map(r => r.id);
   const lastSelectedIndex = Math.max(...ids.map((id, i) => chosen.has(id) ? i : -1));
   const beforeId = lastSelectedIndex + 1 < ids.length ? ids[lastSelectedIndex + 1] : null;
-  return addRows(beforeId);
+  const addedIds = await addRows(beforeId);
+  if (addedIds) {
+    // Select the row just added so repeated clicks keep chaining downward.
+    const newLast = addedIds[addedIds.length - 1];
+    chosen = new Set([newLast]);
+    selectionAnchor = newLast;
+    updateSelection();
+  }
 });
 $('newRowText').addEventListener('keydown', event => {
   if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.isComposing && event.keyCode !== 229) {
