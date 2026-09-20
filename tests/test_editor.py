@@ -617,6 +617,25 @@ class EditorTests(unittest.TestCase):
         finally:
             m.job['running'] = False
 
+    def test_project_list_is_newest_first(self):
+        import shutil
+        import uuid
+        made = []
+        try:
+            for name, age in (('古い', 300), ('新しい', 0), ('中間', 100)):
+                pid = uuid.uuid4().hex
+                folder = m.DATA / 'projects' / pid
+                folder.mkdir(parents=True)
+                (folder / 'project.json').write_text(f'{{"id": "{pid}", "name": "{name}", "rows": []}}', 'utf-8')
+                stamp = time.time() - age
+                os.utime(folder / 'project.json', (stamp, stamp))
+                made.append((pid, name))
+            listed = [p['name'] for p in self.c.get('/api/state').json()['projects'] if p['id'] in {pid for pid, _ in made}]
+            self.assertEqual(listed, ['新しい', '中間', '古い'])
+        finally:
+            for pid, _ in made:
+                shutil.rmtree(m.DATA / 'projects' / pid, ignore_errors=True)
+
     def test_auto_export_publishes_each_generated_row(self):
         import io
         import uuid

@@ -660,9 +660,11 @@ def restore_project(pid: str):
 @app.get('/api/state')
 def state():
     with lock:
-        projects = [read_json(p, {}) for p in (DATA / 'projects').glob('*/project.json')]
+        # Newest first, using the same "updated" time as the project management list.
+        found = sorted(((path.stat().st_mtime, read_json(path, {})) for path in (DATA / 'projects').glob('*/project.json')),
+                       key=lambda item: item[0], reverse=True)
         return {'settings': settings, 'dictionary': dictionary, 'shared_library': bool(SHARED_DATA), 'job': copy.deepcopy(job),
-                'projects': [{'id': p['id'], 'name': p['name']} for p in projects]}
+                'projects': [{'id': p['id'], 'name': p['name']} for _, p in found]}
 
 
 @app.put('/api/settings')
