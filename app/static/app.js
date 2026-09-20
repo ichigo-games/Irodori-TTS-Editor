@@ -146,7 +146,7 @@ async function startGeneration(mode,ids){
   state=await api('/state');updateJob();syncProject(await api('/projects/'+project.id))
 }
 function autoExportOn(){return $('autoExport').getAttribute('aria-checked')==='true'}
-function renderAutoExport(on){$('autoExport').setAttribute('aria-checked',String(on));$('autoExport').textContent='自動出力：'+(on?'ON':'OFF');try{localStorage.setItem('autoExport',on?'1':'0')}catch{}}
+function renderAutoExport(on){$('autoExport').setAttribute('aria-checked',String(on));$('autoExport').querySelector('.switch-text').textContent=on?'ON':'OFF';try{localStorage.setItem('autoExport',on?'1':'0')}catch{}}
 $('autoExport').onclick=()=>renderAutoExport(!autoExportOn());
 try{renderAutoExport(localStorage.getItem('autoExport')==='1')}catch{renderAutoExport(false)}
 $('projects').onchange=guard(async e=>{const next=e.target.value;if(!next)return;if(!await mayLeaveProject()){$('projects').value=project?.id??'';return;}const opened=await api(`/projects/${next}/open-saved`,json('POST',{}));await loadProject(opened.id);renderState()});
