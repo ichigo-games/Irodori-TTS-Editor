@@ -636,6 +636,77 @@ class EditorTests(unittest.TestCase):
             for pid, _ in made:
                 shutil.rmtree(m.DATA / 'projects' / pid, ignore_errors=True)
 
+    def test_stop_interrupts_manual_export_between_files(self):
+        import uuid
+        pid = self.create('一\n二\n三')
+        self.c.post(f'/api/projects/{pid}/generate', json={'mode': 'all'})
+        self.wait()
+        real_sleep = m.time.sleep
+        def press_stop_during_spacing(delay):
+            if delay >= .5:
+                m.stop_event.set()  # what the 中断 button does first
+            else:
+                real_sleep(delay)
+        folder = Path(temp.name) / ('stop-' + uuid.uuid4().hex)
+        with patch.object(m.time, 'sleep', side_effect=press_stop_during_spacing):
+            body = self.c.post(f'/api/projects/{pid}/export', json={'folder': str(folder)}).json()
+        # The file being processed is finished, later rows are not published.
+        self.assertTrue(body['stopped'])
+        self.assertEqual((body['count'], len(body['files'])), (1, 1))
+        self.assertEqual([p.name[:3] for p in folder.glob('*.wav')], ['001'])
+        self.assertEqual([p.name[:3] for p in folder.glob('*.txt')], ['001'])
+        # The next export is not affected by the earlier request.
+        again = Path(temp.name) / ('resume-' + uuid.uuid4().hex)
+        with patch.object(m.time, 'sleep', side_effect=lambda delay: real_sleep(delay) if delay < .5 else None):
+            body = self.c.post(f'/api/projects/{pid}/export', json={'folder': str(again)}).json()
+        self.assertFalse(body['stopped'])
+        self.assertEqual(body['count'], 3)
+
+    def test_stop_interrupts_generation_with_auto_export_after_current_row(self):
+        import uuid
+        pid = self.create('一\n二\n三')
+        folder = Path(temp.name) / ('gen-stop-' + uuid.uuid4().hex)
+        real_generate = m.engine.generate
+        def generate(text, reference, scale, seed, path):
+            used = real_generate(text, reference, scale, seed, path)
+            if text == '一':
+                m.stop_event.set()  # 中断 pressed while the first row is being generated
+            return used
+        m.engine.generate = generate
+        real_sleep = m.time.sleep
+        with patch.object(m.time, 'sleep', side_effect=lambda delay: real_sleep(delay) if delay < .5 else None):
+            self.c.post(f'/api/projects/{pid}/generate', json={
+                'mode': 'all', 'auto_export': True, 'export_folder': str(folder)})
+            self.wait()
+        rows = m.load_project(pid)['rows']
+        self.assertEqual([r['status'] for r in rows], ['generated', 'pending', 'pending'])
+        self.assertEqual((m.job['done'], m.job['exported']), (1, 1))  # the row in progress is generated and exported
+        self.assertTrue(m.job['stop_requested'])
+        self.assertEqual([p.name[:3] for p in folder.glob('*.wav')], ['001'])
+
+    def test_stop_endpoint_does_not_wait_for_a_running_export(self):
+        holder_ready, release = threading.Event(), threading.Event()
+        def hold_lock():
+            with m.lock:  # an export holds the lock for its whole run
+                holder_ready.set()
+                release.wait(5)
+        holder = threading.Thread(target=hold_lock)
+        holder.start()
+        try:
+            self.assertTrue(holder_ready.wait(2))
+            m.stop_event.clear()
+            started = time.monotonic()
+            response = self.c.post('/api/projects/' + '0' * 32 + '/stop-generation')
+            elapsed = time.monotonic() - started
+        finally:
+            release.set()
+            holder.join()
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()['stop_requested'])
+        self.assertTrue(m.stop_event.is_set())
+        self.assertLess(elapsed, 4)
+        m.stop_event.clear()
+
     def test_auto_export_publishes_each_generated_row(self):
         import io
         import uuid

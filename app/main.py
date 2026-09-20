@@ -136,6 +136,9 @@ DEFAULT_POST_PROCESSING = {
 }
 
 lock = threading.RLock()
+# Set by the 中断 button. Checked between rows by both generation jobs and manual exports
+# (an export holds `lock` for its whole run, so this flag must not need the lock).
+stop_event = threading.Event()
 engine = IrodoriEngine()
 settings = read_json(DATA / 'settings.json', {'reference': '', 'duration_scale': 0.85})
 settings.setdefault('normalize_numbers', True)
@@ -861,7 +864,8 @@ def run_job(pid, ids, seed_mode, reference, entries, normalize_numeric=True, exp
     try:
         for rid in ids:
             with lock:
-                if job.get('stop_requested'):
+                if job.get('stop_requested') or stop_event.is_set():
+                    job['stop_requested'] = True
                     break
                 p = load_project(pid)
                 row = p['rows'][rid - 1]
@@ -944,6 +948,7 @@ def generate(pid: str, value: Generate):
         if invalid:
             raise HTTPException(400, 'マスター音声が見つかりません。行: ' + ', '.join(invalid))
         export_folder = resolve_export_folder(value.export_folder) if value.auto_export else None
+        stop_event.clear()
         job.update(running=True, done=0, total=len(ids), errors=0, project=pid, fatal_error=None, stop_requested=False, ids=ids, completed_ids=[],
                    job_id=uuid.uuid4().hex, auto_export=value.auto_export, export_folder=str(export_folder) if export_folder else None,
                    exported=0, export_errors=0, export_error=None)
@@ -953,10 +958,17 @@ def generate(pid: str, value: Generate):
 
 @app.post('/api/projects/{pid}/stop-generation')
 def stop_generation(pid: str):
-    with lock:
-        if job['running'] and job['project'] == pid:
-            job['stop_requested'] = True
-        return copy.deepcopy(job)
+    """中断: stop generation or a manual export after the row/file currently being processed."""
+    stop_event.set()
+    # A running export holds `lock` until it ends, so only wait for it briefly.
+    if lock.acquire(timeout=1.0):
+        try:
+            if job['running'] and job['project'] == pid:
+                job['stop_requested'] = True
+            return copy.deepcopy(job)
+        finally:
+            lock.release()
+    return dict(job, stop_requested=True)
 
 
 def resolve_audio_source(pid, row, variant='auto'):
@@ -1000,8 +1012,11 @@ def resolve_export_folder(raw):
     return folder
 
 
-def write_export_files(pid, p, rows, folder):
-    """Publish a WAV + subtitle pair per row (subtitle first, WAV last). Caller holds `lock`."""
+def write_export_files(pid, p, rows, folder, stop=None):
+    """Publish a WAV + subtitle pair per row (subtitle first, WAV last). Caller holds `lock`.
+
+    Returns the stems actually published; fewer than `rows` when `stop` was set meanwhile.
+    """
     try:
         folder.mkdir(parents=True, exist_ok=True)
         exported_at = datetime.now()
@@ -1011,12 +1026,17 @@ def write_export_files(pid, p, rows, folder):
             if not any((folder / (stem + ext)).exists() for stem in stems for ext in ('.wav', '.txt')):
                 break
             exported_at += timedelta(milliseconds=10)
+        published = 0
         for index, (row, stem) in enumerate(zip(rows, stems)):
             if index:
                 time.sleep(1.0)
+            if stop is not None and stop.is_set():
+                break
             subtitle = format_subtitle(row['subtitle_text']) if settings['wrap_subtitles'] else row['subtitle_text']
             source = output_audio(resolve_audio_source(pid, row, 'auto'), row.get('pause_ms', 0))
             publish_export_pair(source, folder, stem, subtitle)
+            published += 1
+        stems = stems[:published]
     except OSError as exc:
         raise HTTPException(400, f'出力先に書き込めません：{folder}。書き込み権限と空き容量を確認してください。制限付き環境から起動している場合は、通常のPowerShellから start.ps1 で起動してください。途中のファイルがある場合、このフォルダの出力は未完了です。詳細：{exc}') from exc
     return stems
@@ -1037,10 +1057,12 @@ def export(pid: str, value: Export):
         if any(r['status'] != 'generated' for r in rows):
             raise HTTPException(400, '出力対象の未生成・変更あり・エラー行を生成してから出力してください')
         folder = resolve_export_folder(value.folder)
-        stems = write_export_files(pid, p, rows, folder)
+        stop_event.clear()
+        stems = write_export_files(pid, p, rows, folder, stop_event)
         p.update(output_folder=str(folder), last_export=str(folder))
         atomic_json(project_path(pid), p)
-        return {'folder': str(folder), 'count': len(rows), 'files': [stem + '.wav' for stem in stems]}
+        return {'folder': str(folder), 'count': len(stems), 'files': [stem + '.wav' for stem in stems],
+                'stopped': len(stems) < len(rows)}
 
 
 def publish_export_pair(source, folder, stem, subtitle):

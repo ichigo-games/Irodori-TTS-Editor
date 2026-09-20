@@ -126,8 +126,9 @@ function previewAudioUrl(variant){
 }
 $('ppPlayBefore').onclick=guard(()=>{const audio=$('ppPreviewAudio');audio.src=previewAudioUrl('raw');audio.play()});
 $('ppPlayAfter').onclick=guard(()=>{const audio=$('ppPreviewAudio');audio.src=previewAudioUrl('processed');audio.play()});
-function updateJob(){const j=state.job;busy=j.running;$('stopGeneration').disabled=!busy||j.stop_requested;$('stopGeneration').textContent=j.stop_requested?'現在行の完了後に停止…':'生成を中断';if(j.fatal_error)message('生成処理が停止しました: '+j.fatal_error,true);$('progress').max=j.total||1;$('progress').value=j.done;$('progressText').textContent=j.running?`${j.done} / ${j.total} 完了・No.${j.current??'—'} 生成中（初回はモデルをロード）${j.auto_export?`・出力 ${j.exported??0} 件`:''}`:(j.total?`${j.done} / ${j.total} 完了・エラー ${j.errors} 行${j.auto_export?`・出力 ${j.exported??0} 件`:''}`:project?`${project.rows.length} セリフ`:'台本を読み込んでください');for(const id of ['registerMaster','masterName','masterPath','masterFile','missing','selected','all','applyScale','applyPause','bulkScale','bulkPause','saveSettings','defaultPause','normalizeNumbers','wrapSubtitles','savePostProcessing','ppEnabled','eqEnabled','eqPreset','eqFrequency','eqGain','eqQ','peakEnabled','peakDbfs','ppPreviewRow','ppPlayBefore','ppPlayAfter','saveDictionary','addWord','script','voice','projects','newProject','addRow','addRowAfterSelection','newRowText','export','exportMode','saveProject','copyProject','projectName','chooseOutput','openProject','autoExport'])$(id).disabled=busy;document.querySelectorAll('#dictionary input,#dictionary button,#masterList button').forEach(e=>e.disabled=busy||e.dataset.inUse==='true');for(const id of ['eqFrequency','eqGain','eqQ'])$(id).disabled=busy||$('eqPreset').value!=='custom';applySharedReadOnly();announceAutoExport(j)}
+function updateJob(){const j=state.job;busy=j.running;const stopping=(busy&&j.stop_requested)||(exporting&&exportStopping);$('stopGeneration').disabled=!(busy||exporting)||stopping;$('stopGeneration').textContent=stopping?'現在行の完了後に停止…':'中断';if(j.fatal_error)message('生成処理が停止しました: '+j.fatal_error,true);$('progress').max=j.total||1;$('progress').value=j.done;$('progressText').textContent=j.running?`${j.done} / ${j.total} 完了・No.${j.current??'—'} 生成中（初回はモデルをロード）${j.auto_export?`・出力 ${j.exported??0} 件`:''}`:(j.total?`${j.done} / ${j.total} 完了・エラー ${j.errors} 行${j.auto_export?`・出力 ${j.exported??0} 件`:''}`:project?`${project.rows.length} セリフ`:'台本を読み込んでください');for(const id of ['registerMaster','masterName','masterPath','masterFile','missing','selected','applyScale','applyPause','bulkScale','bulkPause','saveSettings','defaultPause','normalizeNumbers','wrapSubtitles','savePostProcessing','ppEnabled','eqEnabled','eqPreset','eqFrequency','eqGain','eqQ','peakEnabled','peakDbfs','ppPreviewRow','ppPlayBefore','ppPlayAfter','saveDictionary','addWord','script','voice','projects','newProject','addRow','addRowAfterSelection','newRowText','export','exportMode','saveProject','copyProject','projectName','chooseOutput','openProject','autoExport'])$(id).disabled=busy;document.querySelectorAll('#dictionary input,#dictionary button,#masterList button').forEach(e=>e.disabled=busy||e.dataset.inUse==='true');for(const id of ['eqFrequency','eqGain','eqQ'])$(id).disabled=busy||$('eqPreset').value!=='custom';applySharedReadOnly();announceAutoExport(j)}
 let autoExportWatch=null;
+let exporting=false,exportStopping=false;
 function announceAutoExport(j){
   if(!autoExportWatch||j.job_id!==autoExportWatch||j.running)return;
   autoExportWatch=null;
@@ -182,7 +183,7 @@ async function applyBulkValue(field, inputId, label) {
 $('applyScale').onclick=guard(()=>applyBulkValue('duration_scale','bulkScale','話速'));
 $('applyPause').onclick=guard(()=>applyBulkValue('pause_ms','bulkPause','末尾無音'));
 
-for(const [id,mode] of [['missing','missing'],['selected','selected'],['all','all']])$(id).onclick=guard(()=>{if(!project)throw Error('台本を読み込んでください');return startGeneration(mode,[...chosen])});
+for(const [id,mode] of [['missing','missing'],['selected','selected']])$(id).onclick=guard(()=>{if(!project)throw Error('台本を読み込んでください');return startGeneration(mode,[...chosen])});
 // Keep the destination and export result visible, including after a reload.
 const exportInfo = node('div');
 exportInfo.id = 'exportInfo';
@@ -223,11 +224,15 @@ async function exportRows(selectedOnly, explicitIds = null) {
     if (!$('output').value.trim() && !await pickOutputFolder()) return;
     if (project?.id !== pid) throw Error('プロジェクトが切り替わりました。もう一度出力してください');
     localStorage.setItem('output:' + project.id, $('output').value);
-    const result = await api(`/projects/${project.id}/export`, json('POST', {folder: $('output').value, ids}));
+    exporting = true; exportStopping = false; updateJob();
+    let result;
+    try {
+      result = await api(`/projects/${project.id}/export`, json('POST', {folder: $('output').value, ids}));
+    } finally { exporting = false; exportStopping = false; updateJob(); }
     localStorage.setItem('export:' + pid, result.folder);exportingProject.last_export=result.folder;exportingProject.output_folder=result.folder;
     exportError = '';
     showExportInfo();
-    message(`${result.count} 組を出力しました\n${result.folder}`);
+    message(result.stopped ? `中断しました：${result.count} 組を出力済み\n${result.folder}` : `${result.count} 組を出力しました\n${result.folder}`);
   } catch (e) {
     exportError = e.message;
     showExportInfo();
@@ -296,9 +301,12 @@ playback.resolve = item => {
 };
 $('stopGeneration').onclick=guard(async()=>{
   if(!project)return;
-  state.job=await api(`/projects/${project.id}/stop-generation`,json('POST',{}));
+  if(exporting)exportStopping=true;
   updateJob();
-  message('現在の行が完了したら生成を停止します');
+  const reply=await api(`/projects/${project.id}/stop-generation`,json('POST',{}));
+  if('running' in reply)state.job=reply;
+  updateJob();
+  message('現在の行が完了したら停止します');
 });
 async function togglePlayback() {
   await saving;
