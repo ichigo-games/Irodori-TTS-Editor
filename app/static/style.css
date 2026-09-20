@@ -75,3 +75,5 @@ th{padding:8px}td{padding:6px 8px}
 .output-icon{display:inline-block;width:20px;height:20px;vertical-align:middle;background-color:currentColor;-webkit-mask:url('/icons/output.svg') center/contain no-repeat;mask:url('/icons/output.svg') center/contain no-repeat}
 
 .delete-icon{display:inline-block;width:20px;height:20px;vertical-align:middle;background-color:currentColor;-webkit-mask:url('/icons/delete.svg') center/contain no-repeat;mask:url('/icons/delete.svg') center/contain no-repeat}
+
+#exportChoice{width:min(420px,90vw);padding:22px;border:1px solid #526276;border-radius:10px;background:#182330;color:#e0e7ef;box-shadow:0 20px 60px #0008}#exportChoice::backdrop{background:#0009}#exportChoice h2{font-size:17px;margin:0 0 8px}#exportChoice .choice-buttons{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}
