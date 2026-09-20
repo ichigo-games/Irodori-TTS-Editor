@@ -55,7 +55,7 @@ main{flex:1;min-height:0;display:flex;flex-direction:column;padding:10px 16px}
 #autoExport .switch-track{position:relative;display:inline-block;width:58px;height:26px;border-radius:13px;background:#3d4652;border:1px solid #556170;transition:background .15s,border-color .15s}
 #autoExport .switch-knob{position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:#171d26;transition:left .15s}
 #autoExport .switch-text{position:absolute;top:0;bottom:0;right:9px;display:flex;align-items:center;font-size:11px;font-weight:600;color:#eaf0f6}
-#autoExport[aria-checked=true] .switch-track{background:#43c85f;border-color:#6fe088}#autoExport[aria-checked=true] .switch-knob{left:34px}#autoExport[aria-checked=true] .switch-text{right:auto;left:9px}
+#autoExport[aria-checked=true] .switch-track{background:#388f82;border-color:#58b4a5}#autoExport[aria-checked=true] .switch-knob{left:34px}#autoExport[aria-checked=true] .switch-text{right:auto;left:9px}
 .command-divider{height:24px;border-left:1px solid #435466;margin:0 5px}
 #panelEditor button,#panelEditor select,#panelEditor input{padding:6px 8px}
 #panelEditor #togglePlayback{padding:5px 8px}
