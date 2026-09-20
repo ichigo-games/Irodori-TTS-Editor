@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Irodori TTS Editor</title><link rel="stylesheet" href="/style.css?v=20260921-exportchoice">
+<title>Irodori TTS Editor</title><link rel="stylesheet" href="/style.css?v=20260921-genchoice">
 <header><h1><span>彩</span> Irodori <small>TTS Editor</small></h1><p>YouTubeナレーション制作 / ローカルエディタ</p></header>
 <main>
 <section class="setup"><label>プロジェクト <select id="projects"><option value="">台本を読み込んで開始</option></select></label><span id="name"></span><span class="command-divider"></span><button id="newProject">新規プロジェクト</button><button id="openProject">開く…</button><button id="saveProject">保存</button><button id="copyProject">名前を付けて保存…</button><details class="file-options"><summary>その他</summary><div class="settings"><label>保存名<input id="projectName" placeholder="プロジェクト名"></label><label><input id="autoSaveProject" type="checkbox" disabled>保存済みファイルを自動保存（この作業中）</label></div></details><span class="command-divider"></span><button id="script">＋ 台本txt / CSVを読み込む</button><button id="manageProjects">プロジェクト管理</button></section><p id="projectSaved" class="hint"></p>
@@ -11,7 +11,7 @@
 <button id="tabBulk" role="tab" aria-selected="false" tabindex="-1" aria-controls="panelBulk" data-panel="panelBulk">一括</button>
 </nav>
 <section id="panelEditor" role="tabpanel" aria-labelledby="tabEditor">
-<section class="export command-bar"><label>出力先<input id="output" placeholder="出力フォルダ"></label><button id="chooseOutput">参照…</button><button id="export">出力</button><button id="autoExport" type="button" role="switch" aria-checked="false" title="ONの間、生成した行を生成のたびに出力先へ自動で出力します"><span>自動出力</span><span class="switch-track"><span class="switch-text">OFF</span><span class="switch-knob"></span></span></button><span class="command-divider"></span><button id="missing" class="primary">すべて生成</button><button id="selected">選択行を生成</button><button id="stopGeneration" disabled title="生成・出力を、処理中の行が終わったところで中断します">中断</button></section>
+<section class="export command-bar"><label>出力先<input id="output" placeholder="出力フォルダ"></label><button id="chooseOutput">参照…</button><button id="export">出力</button><button id="autoExport" type="button" role="switch" aria-checked="false" title="ONの間、生成した行を生成のたびに出力先へ自動で出力します"><span>自動出力</span><span class="switch-track"><span class="switch-text">OFF</span><span class="switch-knob"></span></span></button><span class="command-divider"></span><button id="generate" class="primary" title="押すと「すべて生成」か「選択行を生成」を選びます">生成</button><button id="stopGeneration" disabled title="生成・出力を、処理中の行が終わったところで中断します">中断</button></section>
 <section class="toolbar"><button id="togglePlayback" aria-label="連続再生／続きから再生" title="選択なし：先頭から／選択あり：最初の選択行から末尾まで">▶</button><audio id="continuousAudio" controls preload="none"></audio><span id="playbackStatus" role="status">選択なし：先頭から／選択あり：選択行から末尾まで</span></section>
 <section class="progress"><span id="progressText">台本を読み込んでください</span><progress id="progress" value="0" max="1"></progress><span id="selection">0 行選択</span></section>
 <section class="toolbar"><label style="flex:1">追加するセリフ<textarea id="newRowText" style="flex:1" placeholder="1行1セリフ。複数行貼り付けでまとめて追加（Ctrl+Enterでも追加）" maxlength="50000" rows="2"></textarea></label><button id="addRow">＋ 末尾に追加</button><button id="addRowAfterSelection">＋ 選択行の下に追加</button></section>
@@ -41,7 +41,7 @@
 <p>話速を変更した音声は再生成が必要です。末尾無音の変更は再生成不要で、試聴と次回の出力に反映されます。</p></section>
 </section>
 <dialog id="projectManager"><h2>プロジェクト管理</h2><p>作業プロジェクトをゴミ箱へ移動・復元できます。保存済みの .irodori とYMM4用出力は残ります。</p><button id="refreshProjects">更新</button><button id="closeProjects">閉じる</button><div id="projectManagerList"></div></dialog>
-<dialog id="exportChoice" aria-labelledby="exportChoiceTitle"><h2 id="exportChoiceTitle">出力する行を選んでください</h2><p id="exportChoiceInfo" class="hint"></p><div class="choice-buttons"><button id="exportAll" class="primary">全件を出力</button><button id="exportSelected">選択行のみ出力</button><button id="exportCancel">キャンセル</button></div></dialog>
+<dialog id="exportChoice" aria-labelledby="exportChoiceTitle"><h2 id="exportChoiceTitle"></h2><p id="exportChoiceInfo" class="hint"></p><div class="choice-buttons"><button id="exportAll" class="primary"></button><button id="exportSelected"></button><button id="exportCancel">キャンセル</button></div></dialog>
 <dialog id="readingDialog" aria-labelledby="readingTitle"><h2 id="readingTitle">実際のTTS送信文</h2><p class="hint">辞書・数字補正を反映した読み上げ内容です。</p><div id="readingText"></div><form method="dialog"><button id="closeReading" autofocus>閉じる</button></form></dialog>
 <div id="message" role="status" aria-live="polite"></div>
-</main><script src="/playback.js?v=20260912-masters"></script><script src="/row_drag.js?v=20260912-move"></script><script src="/shared_library.js?v=20260914"></script><script src="/app.js?v=20260921-exportchoice"></script><script src="/project_management.js?v=manual-save"></script></html>
+</main><script src="/playback.js?v=20260912-masters"></script><script src="/row_drag.js?v=20260912-move"></script><script src="/shared_library.js?v=20260914"></script><script src="/app.js?v=20260921-genchoice"></script><script src="/project_management.js?v=manual-save"></script></html>

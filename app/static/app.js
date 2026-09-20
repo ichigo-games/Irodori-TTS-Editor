@@ -126,7 +126,7 @@ function previewAudioUrl(variant){
 }
 $('ppPlayBefore').onclick=guard(()=>{const audio=$('ppPreviewAudio');audio.src=previewAudioUrl('raw');audio.play()});
 $('ppPlayAfter').onclick=guard(()=>{const audio=$('ppPreviewAudio');audio.src=previewAudioUrl('processed');audio.play()});
-function updateJob(){const j=state.job;busy=j.running;const stopping=(busy&&j.stop_requested)||(exporting&&exportStopping);$('stopGeneration').disabled=!(busy||exporting)||stopping;$('stopGeneration').textContent=stopping?'現在行の完了後に停止…':'中断';if(j.fatal_error)message('生成処理が停止しました: '+j.fatal_error,true);$('progress').max=j.total||1;$('progress').value=j.done;$('progressText').textContent=j.running?`${j.done} / ${j.total} 完了・No.${j.current??'—'} 生成中（初回はモデルをロード）${j.auto_export?`・出力 ${j.exported??0} 件`:''}`:(j.total?`${j.done} / ${j.total} 完了・エラー ${j.errors} 行${j.auto_export?`・出力 ${j.exported??0} 件`:''}`:project?`${project.rows.length} セリフ`:'台本を読み込んでください');for(const id of ['registerMaster','masterName','masterPath','masterFile','missing','selected','applyScale','applyPause','bulkScale','bulkPause','saveSettings','defaultPause','normalizeNumbers','wrapSubtitles','savePostProcessing','ppEnabled','eqEnabled','eqPreset','eqFrequency','eqGain','eqQ','peakEnabled','peakDbfs','ppPreviewRow','ppPlayBefore','ppPlayAfter','saveDictionary','addWord','script','voice','projects','newProject','addRow','addRowAfterSelection','newRowText','export','saveProject','copyProject','projectName','chooseOutput','openProject','autoExport'])$(id).disabled=busy;document.querySelectorAll('#dictionary input,#dictionary button,#masterList button').forEach(e=>e.disabled=busy||e.dataset.inUse==='true');for(const id of ['eqFrequency','eqGain','eqQ'])$(id).disabled=busy||$('eqPreset').value!=='custom';applySharedReadOnly();announceAutoExport(j)}
+function updateJob(){const j=state.job;busy=j.running;const stopping=(busy&&j.stop_requested)||(exporting&&exportStopping);$('stopGeneration').disabled=!(busy||exporting)||stopping;$('stopGeneration').textContent=stopping?'現在行の完了後に停止…':'中断';if(j.fatal_error)message('生成処理が停止しました: '+j.fatal_error,true);$('progress').max=j.total||1;$('progress').value=j.done;$('progressText').textContent=j.running?`${j.done} / ${j.total} 完了・No.${j.current??'—'} 生成中（初回はモデルをロード）${j.auto_export?`・出力 ${j.exported??0} 件`:''}`:(j.total?`${j.done} / ${j.total} 完了・エラー ${j.errors} 行${j.auto_export?`・出力 ${j.exported??0} 件`:''}`:project?`${project.rows.length} セリフ`:'台本を読み込んでください');for(const id of ['registerMaster','masterName','masterPath','masterFile','generate','applyScale','applyPause','bulkScale','bulkPause','saveSettings','defaultPause','normalizeNumbers','wrapSubtitles','savePostProcessing','ppEnabled','eqEnabled','eqPreset','eqFrequency','eqGain','eqQ','peakEnabled','peakDbfs','ppPreviewRow','ppPlayBefore','ppPlayAfter','saveDictionary','addWord','script','voice','projects','newProject','addRow','addRowAfterSelection','newRowText','export','saveProject','copyProject','projectName','chooseOutput','openProject','autoExport'])$(id).disabled=busy;document.querySelectorAll('#dictionary input,#dictionary button,#masterList button').forEach(e=>e.disabled=busy||e.dataset.inUse==='true');for(const id of ['eqFrequency','eqGain','eqQ'])$(id).disabled=busy||$('eqPreset').value!=='custom';applySharedReadOnly();announceAutoExport(j)}
 let autoExportWatch=null;
 let exporting=false,exportStopping=false;
 function announceAutoExport(j){
@@ -183,7 +183,7 @@ async function applyBulkValue(field, inputId, label) {
 $('applyScale').onclick=guard(()=>applyBulkValue('duration_scale','bulkScale','話速'));
 $('applyPause').onclick=guard(()=>applyBulkValue('pause_ms','bulkPause','末尾無音'));
 
-for(const [id,mode] of [['missing','missing'],['selected','selected']])$(id).onclick=guard(()=>{if(!project)throw Error('台本を読み込んでください');return startGeneration(mode,[...chosen])});
+$('generate').onclick=guard(async()=>{if(!project)throw Error('台本を読み込んでください');if(busy)return;const target=await chooseTarget('生成する行を選んでください','すべて生成','選択行を生成','（すべて生成は生成済み以外が対象）');if(target)await startGeneration(target==='selected'?'selected':'missing',[...chosen])});
 // Keep the destination and export result visible, including after a reload.
 const exportInfo = node('div');
 exportInfo.id = 'exportInfo';
@@ -280,9 +280,12 @@ $('openProject').onclick = guard(async () => {
   message('プロジェクトを開きました');
 });
 
-function chooseExportTarget() {
+function chooseTarget(title, allLabel, selectedLabel, allNote = '') {
   const dialog = $('exportChoice'), count = chosen.size;
-  $('exportChoiceInfo').textContent = `全 ${project.rows.length} 行／選択中 ${count} 行`;
+  $('exportChoiceTitle').textContent = title;
+  $('exportAll').textContent = allLabel;
+  $('exportSelected').textContent = selectedLabel;
+  $('exportChoiceInfo').textContent = `全 ${project.rows.length} 行／選択中 ${count} 行${allNote}`;
   $('exportSelected').disabled = !count;
   return new Promise(resolve => {
     const finish = value => { dialog.close(); resolve(value); };
@@ -296,7 +299,7 @@ function chooseExportTarget() {
 $('export').onclick = guard(async () => {
   if (!project) throw Error('台本を読み込んでください');
   if (busy) throw Error('生成中です。完了後に出力してください');
-  const target = await chooseExportTarget();
+  const target = await chooseTarget('出力する行を選んでください', '全件を出力', '選択行のみ出力');
   if (target) await exportRows(target === 'selected');
 });
 const playback = new PlaybackQueue($('continuousAudio'),
