@@ -51,6 +51,7 @@ main{flex:1;min-height:0;display:flex;flex-direction:column;padding:10px 16px}
 .command-bar>label{flex:1 1 160px;min-width:110px;max-width:none}
 .command-bar #output{min-width:70px;width:100%}
 .command-bar>button,.command-bar>select{flex-shrink:0}
+#autoExport{min-width:8.6em}#autoExport[aria-checked=true]{background:#388f82;border-color:#58b4a5;color:#fff}#autoExport[aria-checked=true]:hover{background:#43a294}
 .command-divider{height:24px;border-left:1px solid #435466;margin:0 5px}
 #panelEditor button,#panelEditor select,#panelEditor input{padding:6px 8px}
 #panelEditor #togglePlayback{padding:5px 8px}

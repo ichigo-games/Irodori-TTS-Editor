@@ -379,6 +379,8 @@ class Generate(BaseModel):
     ids: list[int] | None = None
     mode: str = 'missing'
     seed_mode: str = 'configured'
+    auto_export: bool = False
+    export_folder: str = ''
 
 
 class Export(BaseModel):
@@ -852,7 +854,8 @@ def move_rows(pid: str, value: MoveRows):
         return {'project': p, 'selected': selected}
 
 
-def run_job(pid, ids, seed_mode, reference, entries, normalize_numeric=True):
+def run_job(pid, ids, seed_mode, reference, entries, normalize_numeric=True, export_folder=None):
+    last_export_at = None
     try:
         for rid in ids:
             with lock:
@@ -896,6 +899,23 @@ def run_job(pid, ids, seed_mode, reference, entries, normalize_numeric=True):
                     f.write(json.dumps({**snapshot, **result, 'effective_text': actual_text, 'attempted_seed': seed}, ensure_ascii=False) + '\n')
                 job['done'] += 1
                 job.setdefault('completed_ids', []).append(rid)
+            if export_folder is not None and result['status'] == 'generated':
+                # Same 1 s spacing between published files as a manual multi-row export.
+                if last_export_at is not None:
+                    time.sleep(max(0.0, 1.0 - (time.monotonic() - last_export_at)))
+                try:
+                    with lock:
+                        p = load_project(pid)
+                        if p['rows'][rid - 1]['status'] == 'generated':
+                            write_export_files(pid, p, [p['rows'][rid - 1]], export_folder)
+                            p.update(output_folder=str(export_folder), last_export=str(export_folder))
+                            atomic_json(project_path(pid), p)
+                            job['exported'] += 1
+                except Exception as exc:
+                    with lock:
+                        job['export_errors'] += 1
+                        job['export_error'] = exc.detail if isinstance(exc, HTTPException) else repr(exc)
+                last_export_at = time.monotonic()
     except Exception as exc:
         with lock:
             job['fatal_error'] = repr(exc)
@@ -921,8 +941,11 @@ def generate(pid: str, value: Generate):
         invalid = [str(rid) for rid, ref in references.items() if not ref or not Path(ref).is_file()]
         if invalid:
             raise HTTPException(400, 'マスター音声が見つかりません。行: ' + ', '.join(invalid))
-        job.update(running=True, done=0, total=len(ids), errors=0, project=pid, fatal_error=None, stop_requested=False, ids=ids, completed_ids=[])
-        threading.Thread(target=run_job, args=(pid, ids, value.seed_mode, references, copy.deepcopy(dictionary), settings['normalize_numbers']), daemon=True).start()
+        export_folder = resolve_export_folder(value.export_folder) if value.auto_export else None
+        job.update(running=True, done=0, total=len(ids), errors=0, project=pid, fatal_error=None, stop_requested=False, ids=ids, completed_ids=[],
+                   job_id=uuid.uuid4().hex, auto_export=value.auto_export, export_folder=str(export_folder) if export_folder else None,
+                   exported=0, export_errors=0, export_error=None)
+        threading.Thread(target=run_job, args=(pid, ids, value.seed_mode, references, copy.deepcopy(dictionary), settings['normalize_numbers'], export_folder), daemon=True).start()
         return copy.deepcopy(job)
 
 
@@ -962,6 +985,41 @@ def audio(pid: str, rid: int, variant: str = 'auto'):
         return FileResponse(output_audio(source, row.get('pause_ms', 0)), media_type='audio/wav')
 
 
+def resolve_export_folder(raw):
+    """Validate an output folder the same way for manual export and auto-export."""
+    parent = Path(raw).expanduser().resolve() if raw else DATA / 'outputs'
+    protect_shared_destination(parent)
+    engine_home = Path(os.environ.get('IRODORI_HOME', r'E:\Irodori-TTS')).resolve()
+    if parent == engine_home or engine_home in parent.parents:
+        raise HTTPException(400, 'Irodori-TTS本体のフォルダには出力できません')
+    folder = parent
+    if folder == DATA.resolve() or any(folder == (DATA / part).resolve() or (DATA / part).resolve() in folder.parents for part in ('projects', 'trash', 'app', 'voices', 'dictionaries')):
+        raise HTTPException(400, '作業データの保存場所には出力できません。専用の出力先を指定してください。')
+    return folder
+
+
+def write_export_files(pid, p, rows, folder):
+    """Publish a WAV + subtitle pair per row (subtitle first, WAV last). Caller holds `lock`."""
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        exported_at = datetime.now()
+        while True:
+            stamp = exported_at.strftime('%Y%m%d_%H%M%S_') + f'{exported_at.microsecond // 10000:02d}'
+            stems = [f'{row["id"]:0{max(3, len(str(len(p["rows"]))))}d}_{stamp}_seed{row["used_seed"] if row["used_seed"] is not None else "unknown"}' for row in rows]
+            if not any((folder / (stem + ext)).exists() for stem in stems for ext in ('.wav', '.txt')):
+                break
+            exported_at += timedelta(milliseconds=10)
+        for index, (row, stem) in enumerate(zip(rows, stems)):
+            if index:
+                time.sleep(1.0)
+            subtitle = format_subtitle(row['subtitle_text']) if settings['wrap_subtitles'] else row['subtitle_text']
+            source = output_audio(resolve_audio_source(pid, row, 'auto'), row.get('pause_ms', 0))
+            publish_export_pair(source, folder, stem, subtitle)
+    except OSError as exc:
+        raise HTTPException(400, f'出力先に書き込めません：{folder}。書き込み権限と空き容量を確認してください。制限付き環境から起動している場合は、通常のPowerShellから start.ps1 で起動してください。途中のファイルがある場合、このフォルダの出力は未完了です。詳細：{exc}') from exc
+    return stems
+
+
 @app.post('/api/projects/{pid}/export')
 def export(pid: str, value: Export):
     with lock:
@@ -976,31 +1034,8 @@ def export(pid: str, value: Export):
             rows = [r for r in rows if r['id'] in set(value.ids)]
         if any(r['status'] != 'generated' for r in rows):
             raise HTTPException(400, '出力対象の未生成・変更あり・エラー行を生成してから出力してください')
-        parent = Path(value.folder).expanduser().resolve() if value.folder else DATA / 'outputs'
-        protect_shared_destination(parent)
-        engine_home = Path(os.environ.get('IRODORI_HOME', r'E:\Irodori-TTS')).resolve()
-        if parent == engine_home or engine_home in parent.parents:
-            raise HTTPException(400, 'Irodori-TTS本体のフォルダには出力できません')
-        folder = parent
-        if folder == DATA.resolve() or any(folder == (DATA / part).resolve() or (DATA / part).resolve() in folder.parents for part in ('projects', 'trash', 'app', 'voices', 'dictionaries')):
-            raise HTTPException(400, '作業データの保存場所には出力できません。専用の出力先を指定してください。')
-        try:
-            folder.mkdir(parents=True, exist_ok=True)
-            exported_at = datetime.now()
-            while True:
-                stamp = exported_at.strftime('%Y%m%d_%H%M%S_') + f'{exported_at.microsecond // 10000:02d}'
-                stems = [f'{row["id"]:0{max(3, len(str(len(p["rows"]))))}d}_{stamp}_seed{row["used_seed"] if row["used_seed"] is not None else "unknown"}' for row in rows]
-                if not any((folder / (stem + ext)).exists() for stem in stems for ext in ('.wav', '.txt')):
-                    break
-                exported_at += timedelta(milliseconds=10)
-            for index, (row, stem) in enumerate(zip(rows, stems)):
-                if index:
-                    time.sleep(1.0)
-                subtitle = format_subtitle(row['subtitle_text']) if settings['wrap_subtitles'] else row['subtitle_text']
-                source = output_audio(resolve_audio_source(pid, row, 'auto'), row.get('pause_ms', 0))
-                publish_export_pair(source, folder, stem, subtitle)
-        except OSError as exc:
-            raise HTTPException(400, f'出力先に書き込めません：{folder}。書き込み権限と空き容量を確認してください。制限付き環境から起動している場合は、通常のPowerShellから start.ps1 で起動してください。途中のファイルがある場合、このフォルダの出力は未完了です。詳細：{exc}') from exc
+        folder = resolve_export_folder(value.folder)
+        stems = write_export_files(pid, p, rows, folder)
         p.update(output_folder=str(folder), last_export=str(folder))
         atomic_json(project_path(pid), p)
         return {'folder': str(folder), 'count': len(rows), 'files': [stem + '.wav' for stem in stems]}

@@ -617,6 +617,82 @@ class EditorTests(unittest.TestCase):
         finally:
             m.job['running'] = False
 
+    def test_auto_export_publishes_each_generated_row(self):
+        import io
+        import uuid
+        import wave
+        buffer = io.BytesIO()
+        with wave.open(buffer, 'wb') as out:
+            out.setnchannels(1)
+            out.setsampwidth(2)
+            out.setframerate(16000)
+            out.writeframes(b'\x01\x00' * 1600)
+        raw = buffer.getvalue()
+        def generate(text, reference, scale, seed, path):
+            if text == '失敗':
+                raise RuntimeError('injected failure')
+            Path(path).write_bytes(raw)
+            return seed
+        m.engine.generate = generate
+        pid = self.create('一\n二\n失敗\n四')
+        folder = Path(temp.name) / ('auto-' + uuid.uuid4().hex)
+        sleeps = []
+        real_sleep = m.time.sleep
+        def fake_sleep(delay):
+            # Skip the 1 s file spacing but keep short polling sleeps real so the job thread is not starved.
+            sleeps.append(delay)
+            if delay < .5:
+                real_sleep(delay)
+        with patch.object(m.time, 'sleep', side_effect=fake_sleep):
+            response = self.c.post(f'/api/projects/{pid}/generate', json={
+                'mode': 'all', 'auto_export': True, 'export_folder': str(folder)})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.wait()
+        # Each generated row is published right after it is generated; the failed row is skipped.
+        self.assertEqual((m.job['exported'], m.job['export_errors'], m.job['errors']), (3, 0, 1))
+        self.assertEqual(m.job['export_folder'], str(folder.resolve()))
+        self.assertEqual([p.name[:3] for p in sorted(folder.glob('*.wav'))], ['001', '002', '004'])
+        self.assertEqual([p.read_text('utf-8-sig') for p in sorted(folder.glob('*.txt'))], ['一', '二', '四'])
+        self.assertEqual(len([d for d in sleeps if d > .5]), 2)  # 1 s spacing between the three published rows
+        with wave.open(str(sorted(folder.glob('*.wav'))[0])) as published:
+            self.assertEqual(published.getnframes(), 1600 + 200 * 16)  # same trailing silence as manual export
+        self.assertEqual(m.load_project(pid)['output_folder'], str(folder.resolve()))
+        # Single-row generation uses the same path.
+        with patch.object(m.time, 'sleep', side_effect=fake_sleep):
+            self.c.post(f'/api/projects/{pid}/generate', json={
+                'mode': 'selected', 'ids': [2], 'seed_mode': 'random', 'auto_export': True, 'export_folder': str(folder)})
+            self.wait()
+        self.assertEqual(m.job['exported'], 1)
+        self.assertEqual(len(list(folder.glob('002_*.wav'))), 2)
+
+    def test_auto_export_off_and_failures_do_not_stop_generation(self):
+        import uuid
+        pid = self.create('一\n二')
+        folder = Path(temp.name) / ('quiet-' + uuid.uuid4().hex)
+        self.c.post(f'/api/projects/{pid}/generate', json={'mode': 'missing', 'export_folder': str(folder)})
+        self.wait()
+        self.assertFalse(folder.exists())
+        self.assertFalse(m.job['auto_export'])
+        self.assertEqual({r['status'] for r in m.load_project(pid)['rows']}, {'generated'})
+        # Unusable destinations are rejected before any generation starts.
+        pid = self.create('三')
+        rejected = self.c.post(f'/api/projects/{pid}/generate', json={
+            'mode': 'all', 'auto_export': True, 'export_folder': str(m.DATA / 'projects')})
+        self.assertEqual(rejected.status_code, 400)
+        self.assertFalse(m.job['running'])
+        self.assertEqual(m.load_project(pid)['rows'][0]['status'], 'pending')
+        # A destination that cannot be written is reported, but rows are still generated.
+        blocker = Path(temp.name) / ('blocked-' + uuid.uuid4().hex)
+        blocker.write_text('not a folder')
+        real_sleep = m.time.sleep
+        with patch.object(m.time, 'sleep', side_effect=lambda delay: real_sleep(delay) if delay < .5 else None):
+            self.c.post(f'/api/projects/{pid}/generate', json={
+                'mode': 'all', 'auto_export': True, 'export_folder': str(blocker)})
+            self.wait()
+        self.assertEqual((m.job['exported'], m.job['export_errors']), (0, 1))
+        self.assertIn('出力先に書き込めません', m.job['export_error'])
+        self.assertEqual(m.load_project(pid)['rows'][0]['status'], 'generated')
+
     def test_export_timestamp_seed_and_collision(self):
         from datetime import datetime
         pid = self.create('出力テスト')
