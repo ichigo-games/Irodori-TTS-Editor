@@ -208,6 +208,18 @@ function showExportInfo() {
   exportInfo.textContent = lines.join('\n');
   exportInfo.hidden = !lines.length;
 }
+function renderOutputFolder() {
+  $('outputFolder').textContent = '出力先：' + ($('output').value.trim() || '未設定（出力時に選択します）');
+}
+{
+  const valueProperty = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+  Object.defineProperty($('output'), 'value', {
+    configurable: true,
+    get() { return valueProperty.get.call(this); },
+    set(v) { valueProperty.set.call(this, v); renderOutputFolder(); }
+  });
+  renderOutputFolder();
+}
 $('output').addEventListener('input', () => {
   if (project) localStorage.setItem('output:' + project.id, $('output').value);
 });
