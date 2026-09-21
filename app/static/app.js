@@ -189,7 +189,7 @@ const exportInfo = node('div');
 exportInfo.id = 'exportInfo';
 exportInfo.setAttribute('role', 'status');
 
-document.querySelector('.export').after(exportInfo);
+$('outputFolder').after(exportInfo);
 let exportError = '';
 let exportProject = null;
 function showExportInfo() {
