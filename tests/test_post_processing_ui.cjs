@@ -7,7 +7,7 @@ const ctx=vm.createContext({$,busy:false,state:{settings:{post_processing:pp},jo
 vm.runInContext(fs.readFileSync('app/static/shared_library.js','utf8'),ctx);
 vm.runInContext(source.slice(0,source.indexOf('const $=')),ctx);
 vm.runInContext(source.slice(source.indexOf('const EQ_PRESETS'),source.indexOf("$('ppPlayBefore')")),ctx);
-vm.runInContext(source.slice(source.indexOf('function updateJob()'),source.indexOf('async function startGeneration')),ctx);
+vm.runInContext(source.slice(source.indexOf('function controlState()'),source.indexOf('async function startGeneration')),ctx);
 (async()=>{
  ctx.renderPostProcessing();ctx.updateJob();assert.equal($('eqGain').disabled,true);
  $('eqPreset').value='custom';ctx.updateEqPresetFields();$('eqGain').value=-6;ctx.updateJob();assert.equal($('eqGain').disabled,false);assert.equal($('eqGain').value,-6);

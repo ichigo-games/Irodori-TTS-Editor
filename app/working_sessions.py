@@ -21,8 +21,8 @@ def working_path(data, pid):
         source = data / 'projects' / pid
         if not (source / 'project.json').exists():
             raise FileNotFoundError(pid)
-        shutil.copytree(source, folder)
-        p = json.loads(path.read_text('utf-8'))
+        p = json.loads((source / 'project.json').read_text('utf-8'))
+        copy_snapshot(source, folder, p, missing_ok=True)
         p.update(dirty=False, catalog_id=pid, autosave=False)
         path.write_text(json.dumps(p, ensure_ascii=False), encoding='utf-8')
     return path
@@ -36,7 +36,7 @@ def discard(pid):
         shutil.rmtree(folder)
 
 
-def copy_snapshot(source, destination, project):
+def copy_snapshot(source, destination, project, missing_ok=False):
     """Copy referenced raw audio only, preserving timestamps for subsequent saves."""
     source, destination = Path(source).resolve(), Path(destination)
     (destination / 'audio').mkdir(parents=True, exist_ok=True)
@@ -46,7 +46,12 @@ def copy_snapshot(source, destination, project):
             raise ValueError('音声パスが不正です')
         target = destination / audio.relative_to(source)
         target.parent.mkdir(parents=True, exist_ok=True)
-        current = audio.stat()
+        try:
+            current = audio.stat()
+        except FileNotFoundError:
+            if missing_ok:
+                continue
+            raise
         if target.is_file():
             previous = target.stat()
             if (current.st_size, current.st_mtime_ns) == (previous.st_size, previous.st_mtime_ns):

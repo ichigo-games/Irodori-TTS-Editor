@@ -584,7 +584,8 @@ def save_project(pid: str, value: ProjectSave):
             old_folder = project_path(pid).parent
             p['id'] = uuid.uuid4().hex
             new_folder = working_sessions.directory(p['id'])
-            shutil.copytree(old_folder, new_folder)
+            working_sessions.copy_snapshot(old_folder, new_folder, p, missing_ok=True)
+            atomic_json(new_folder / 'project.json', p, mark_dirty=False)
         p.update(name=value.name.strip(), output_folder=value.output_folder.strip(),
                  saved_at=datetime.now().isoformat())
         target = selected or (p.get('project_file') if not value.copy_project else None)
@@ -658,8 +659,8 @@ def open_saved_project(pid: str):
             raise HTTPException(404, 'プロジェクトがありません')
         new_id = uuid.uuid4().hex
         destination = working_sessions.directory(new_id)
-        shutil.copytree(source, destination)
-        p = read_json(destination / 'project.json', {})
+        p = read_json(source / 'project.json', {})
+        working_sessions.copy_snapshot(source, destination, p, missing_ok=True)
         p.update(id=new_id, catalog_id=pid, dirty=False, autosave=False)
         atomic_json(destination / 'project.json', p, mark_dirty=False)
         return p

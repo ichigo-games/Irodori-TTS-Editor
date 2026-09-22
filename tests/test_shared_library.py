@@ -60,7 +60,7 @@ class SharedLibraryTests(unittest.TestCase):
         self.assertEqual(result.status_code, 403)
         result = self.c.put('/api/settings', json={'reference': master['reference'], 'duration_scale': .8})
         self.assertEqual(result.status_code, 200, result.text)
-        stored = json.loads((m.DATA / 'settings.json').read_text())
+        stored = json.loads((m.DATA / 'settings.json').read_text(encoding='utf-8'))
         self.assertFalse(any(x.get('shared') for x in stored['masters']))
         self.assertEqual(stored['reference'], master['reference'])
         self.assertEqual(self.original, {p: p.read_bytes() for p in self.source.rglob('*') if p.is_file()})
