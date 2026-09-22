@@ -13,7 +13,7 @@ def write_project_file(path, project, project_folder):
     snapshot.pop('project_file', None)
     temp = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
     try:
-        with zipfile.ZipFile(temp, 'w', zipfile.ZIP_DEFLATED) as archive:
+        with zipfile.ZipFile(temp, 'w', zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
             for n, master in enumerate(snapshot.get('masters', [])):
                 member = f'masters/{n}.wav'
                 archive.write(master['reference'], member)

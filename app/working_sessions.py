@@ -34,3 +34,21 @@ def discard(pid):
         raise ValueError('作業領域が不正です')
     if folder.exists():
         shutil.rmtree(folder)
+
+
+def copy_snapshot(source, destination, project):
+    """Copy referenced raw audio only, preserving timestamps for subsequent saves."""
+    source, destination = Path(source).resolve(), Path(destination)
+    (destination / 'audio').mkdir(parents=True, exist_ok=True)
+    for name in {row['wav'] for row in project['rows'] if row.get('wav')}:
+        audio = (source / name).resolve()
+        if source not in audio.parents:
+            raise ValueError('音声パスが不正です')
+        target = destination / audio.relative_to(source)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        current = audio.stat()
+        if target.is_file():
+            previous = target.stat()
+            if (current.st_size, current.st_mtime_ns) == (previous.st_size, previous.st_mtime_ns):
+                continue
+        shutil.copy2(audio, target)

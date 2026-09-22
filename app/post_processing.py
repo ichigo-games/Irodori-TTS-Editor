@@ -27,6 +27,14 @@ def _peaking_eq(samples, sr, frequency, gain_db, q):
     a2 = 1 - alpha / a
     b0, b1, b2, a1, a2 = (b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0)
 
+    # SciPy is supplied by the TTS environment; keep the existing fallback.
+    try:
+        from scipy.signal import lfilter
+    except ImportError:
+        pass
+    else:
+        return lfilter([b0, b1, b2], [1.0, a1, a2], samples)
+
     out = np.empty_like(samples)
     x1 = x2 = y1 = y2 = 0.0
     for i in range(len(samples)):
@@ -51,7 +59,7 @@ def _peak_control(samples, target_dbfs):
 
 def _build_steps(pp):
     steps = []
-    if pp.get('eq_enabled'):
+    if pp.get('eq_enabled') and float(pp.get('gain_db', 0.0)) != 0:
         steps.append(('eq', float(pp.get('frequency', 3500.0)), float(pp.get('gain_db', 0.0)), float(pp.get('q', 1.0))))
     if pp.get('peak_enabled'):
         steps.append(('peak', float(pp.get('peak_dbfs', -1.0))))

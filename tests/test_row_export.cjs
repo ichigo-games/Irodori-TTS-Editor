@@ -1,11 +1,11 @@
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
 const source=fs.readFileSync('app/static/app.js','utf8');
 const output={value:'E:/trial-output'},calls=[],messages=[];
-const ctx=vm.createContext({project:{id:'p'},busy:false,saving:Promise.resolve(),chosen:new Set([2,3]),
+const ctx=vm.createContext({project:{id:'p'},busy:false,operationPending:false,localOperation:null,state:{},updateJob(){},crypto:require('node:crypto'),saving:Promise.resolve(),chosen:new Set([2,3]),
   $:()=>output,json:(method,data)=>({method,data}),localStorage:{setItem(){}},showExportInfo(){},
   message:(text,error)=>messages.push({text,error}),pickOutputFolder:async()=>false,
   api:async(path,options)=>{calls.push({path,...options});return {folder:output.value,count:1}}});
-vm.runInContext(source.slice(source.indexOf('async function exportRows('),source.indexOf('setInterval(showExportInfo')),ctx);
+vm.runInContext(source.slice(source.indexOf('async function exportRows('),source.indexOf('\nguard(async()=>{state=')),ctx);
 (async()=>{
   await ctx.exportRows(false,[7]);
   assert.equal(calls[0].path,'/projects/p/export');

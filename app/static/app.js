@@ -27,7 +27,7 @@ $('readingDialog').onclick=e=>{if(e.target!==$('readingDialog'))return;const r=e
 function updateSelection(){document.querySelectorAll('#rows tr').forEach(tr=>{const selected=chosen.has(Number(tr.dataset.rowId));tr.classList.toggle('selected-row',selected);tr.setAttribute('aria-selected',String(selected))});$('bulkSelection').textContent=`${chosen.size} 行選択`;$('selection').textContent=`${chosen.size} 行選択`; $('checkAll').checked=!!project&&project.rows.length>0&&chosen.size===project.rows.length;$('checkAll').indeterminate=chosen.size>0&&chosen.size<project.rows.length}
 
 function saveRow(row){const data={subtitle_text:row.subtitle_text,speech_text:row.speech_text,duration_scale:row.duration_scale,seed:row.seed,pause_ms:row.pause_ms??0,master_id:row.master_id??null};const pid=project.id;saving=saving.catch(()=>{}).then(()=>api(`/projects/${pid}/rows/${row.id}`,json('PUT',data)));saving.catch(e=>message('保存失敗: '+e.message,true));return saving}
-function renderRows(){const body=$('rows');body.replaceChildren();if(!project)return;const fragment=document.createDocumentFragment();for(const row of project.rows){const tr=node('tr');tr.dataset.rowId=row.id;tr.tabIndex=0;const selectRow=e=>{if(e.target.closest('button,input,textarea,select,audio,a'))return;playback.stop();if(e.shiftKey&&selectionAnchor!==null){const ids=project.rows.map(r=>r.id);const a=ids.indexOf(selectionAnchor),b=ids.indexOf(row.id);if(!e.ctrlKey&&!e.metaKey)chosen.clear();for(const id of ids.slice(Math.min(a,b),Math.max(a,b)+1))chosen.add(id)}else{if(e.ctrlKey||e.metaKey){chosen.has(row.id)?chosen.delete(row.id):chosen.add(row.id)}else{if(chosen.has(row.id)){chosen.delete(row.id)}else{chosen.clear();chosen.add(row.id)}}selectionAnchor=row.id}updateSelection()};tr.onclick=selectRow;tr.onmousedown=e=>{if(e.shiftKey&&!e.target.closest('button,input,textarea,select,audio'))e.preventDefault()};tr.onkeydown=e=>{if(e.target===tr&&(e.key===' '||e.key==='Enter')){e.preventDefault();selectRow(e)}};const cells=Array.from({length:11},()=>{const td=node('td');tr.append(td);return td});cells[0].textContent='⋮';setupRowDrag(tr,cells[0],row);cells[1].textContent=String(row.id).padStart(Math.max(3,String(project.rows.length).length),'0');for(const [index,key] of [[2,'subtitle_text'],[3,'speech_text']]){const t=node('textarea');t.value=row[key];t.disabled=busy;t.setAttribute('aria-label',`${row.id} ${key==='subtitle_text'?'字幕':'読み上げ'}`);t.onchange=guard(async()=>{row[key]=t.value;const saved=await saveRow(row);Object.assign(row,saved);status.textContent=labels[row.status];status.className='status '+row.status});cells[index].append(t)}const reading=node('button','あ','icon-button');reading.title='辞書・数字補正後の読みを表示';reading.setAttribute('aria-label',`${row.id}行の実際のTTS送信文を表示`);reading.setAttribute('aria-haspopup','dialog');reading.setAttribute('aria-controls','readingDialog');reading.onclick=guard(()=>showReading(row));cells[4].append(reading);const scale=node('input');scale.type='number';scale.min='.25';scale.max='4';scale.step='.05';scale.value=row.duration_scale;scale.disabled=busy;scale.setAttribute('aria-label',`${row.id} 話速`);scale.onchange=guard(async()=>{row.duration_scale=Number(scale.value);Object.assign(row,await saveRow(row));status.textContent=labels[row.status];status.className='status '+row.status});scale.addEventListener('wheel',e=>{if(document.activeElement===scale)e.preventDefault()},{passive:false});cells[5].append(scale);const seed=node('input',undefined,'seed');seed.type='text';seed.placeholder='random';seed.value=row.seed??'';seed.disabled=busy;seed.setAttribute('aria-label',`${row.id} Seed`);seed.onchange=guard(async()=>{if(seed.value!==''&&(!/^\d+$/.test(seed.value)||Number(seed.value)>4294967295))throw Error('Seedは0〜4294967295、または空欄です');row.seed=seed.value===''?null:Number(seed.value);Object.assign(row,await saveRow(row));status.textContent=labels[row.status];status.className='status '+row.status});cells[6].append(seed,node('small','前回: '+(row.used_seed??'—')));const status=node('span',labels[row.status],'status '+row.status);cells[7].append(status);if(row.error)cells[7].append(node('small',row.error));if(row.wav){const audio=node('audio');audio.controls=true;audio.preload='none';audio.src=audioUrl(project.id,row);cells[8].append(audio)}const generate=node('button',row.wav?'再生成':'生成');generate.disabled=busy;generate.onclick=guard(()=>startGeneration('selected',[row.id]));const exportRow=node('button',undefined,'icon-button export-row');const exportIcon=node('span',undefined,'output-icon');exportIcon.setAttribute('aria-hidden','true');exportRow.append(exportIcon);exportRow.title='この行だけ出力（WAV＋字幕txt）';exportRow.setAttribute('aria-label',`${row.id}行だけ出力（WAV＋字幕txt）`);exportRow.disabled=busy;exportRow.onclick=()=>exportRows(false,[row.id]);const remove=node('button',undefined,'icon-button delete-row');const deleteIcon=node('span',undefined,'delete-icon');deleteIcon.setAttribute('aria-hidden','true');remove.append(deleteIcon);remove.title='この行を削除';remove.setAttribute('aria-label',`${row.id}行を削除`);remove.disabled=busy;remove.onclick=guard(async()=>{if(busy)return;await saving;playback.stop();await api(`/projects/${project.id}/rows/${row.id}`,{method:'DELETE'});chosen.clear();selectionAnchor=null;project=await api('/projects/'+project.id);renderRows();showExportInfo();message('行を削除しました')});cells[8].append(generate,exportRow,remove);const master=node('select');master.setAttribute('aria-label',`${row.id} マスター`);const defaultOption=node('option','共通マスター');defaultOption.value='';master.append(defaultOption);for(const item of state.settings.masters??[]){const option=node('option',item.name);option.value=item.id;master.append(option)}if(row.master_id&&!(state.settings.masters??[]).some(m=>m.id===row.master_id)){const missing=node('option','未登録のマスター');missing.value=row.master_id;master.append(missing)}master.value=row.master_id??'';master.disabled=busy;master.onchange=guard(async()=>{const previous=row.master_id;row.master_id=master.value||null;try{Object.assign(row,await saveRow(row));status.textContent=labels[row.status];status.className='status '+row.status}catch(e){row.master_id=previous;master.value=previous??'';throw e}});cells[9].append(master);const pause=node('input');pause.type='number';pause.min=0;pause.max=60000;pause.step=50;pause.value=row.pause_ms??0;pause.disabled=busy;pause.setAttribute('aria-label',`${row.id} 末尾無音ms`);pause.onchange=guard(async()=>{const value=Number(pause.value);if(!Number.isInteger(value)||value<0||value>60000)throw Error('末尾無音は0〜60000ミリ秒の整数です');const saved=await saveRow({...row,pause_ms:value});Object.assign(row,saved);playback.stop();const audio=cells[8].querySelector('audio');if(audio)audio.src=audioUrl(project.id,row)});pause.addEventListener('wheel',e=>{if(document.activeElement===pause)e.preventDefault()},{passive:false});cells[10].append(pause);fragment.append(tr)}body.append(fragment);updateSelection();renderPreviewRowOptions()}
+function renderRows(){const body=$('rows');body.replaceChildren();if(!project)return;const fragment=document.createDocumentFragment();for(const row of project.rows){const tr=node('tr');tr.dataset.rowId=row.id;tr.tabIndex=0;const selectRow=e=>{if(e.target.closest('button,input,textarea,select,audio,a'))return;playback.stop();if(e.shiftKey&&selectionAnchor!==null){const ids=project.rows.map(r=>r.id);const a=ids.indexOf(selectionAnchor),b=ids.indexOf(row.id);if(!e.ctrlKey&&!e.metaKey)chosen.clear();for(const id of ids.slice(Math.min(a,b),Math.max(a,b)+1))chosen.add(id)}else{if(e.ctrlKey||e.metaKey){chosen.has(row.id)?chosen.delete(row.id):chosen.add(row.id)}else{if(chosen.has(row.id)){chosen.delete(row.id)}else{chosen.clear();chosen.add(row.id)}}selectionAnchor=row.id}updateSelection()};tr.onclick=selectRow;tr.onmousedown=e=>{if(e.shiftKey&&!e.target.closest('button,input,textarea,select,audio'))e.preventDefault()};tr.onkeydown=e=>{if(e.target===tr&&(e.key===' '||e.key==='Enter')){e.preventDefault();selectRow(e)}};const cells=Array.from({length:11},()=>{const td=node('td');tr.append(td);return td});cells[0].textContent='⋮';setupRowDrag(tr,cells[0],row);cells[1].textContent=String(row.id).padStart(Math.max(3,String(project.rows.length).length),'0');for(const [index,key] of [[2,'subtitle_text'],[3,'speech_text']]){const t=node('textarea');t.value=row[key];t.disabled=busy;t.setAttribute('aria-label',`${row.id} ${key==='subtitle_text'?'字幕':'読み上げ'}`);t.onchange=guard(async()=>{row[key]=t.value;const saved=await saveRow(row);Object.assign(row,saved);status.textContent=labels[row.status];status.className='status '+row.status});cells[index].append(t)}const reading=node('button','あ','icon-button');reading.title='辞書・数字補正後の読みを表示';reading.setAttribute('aria-label',`${row.id}行の実際のTTS送信文を表示`);reading.setAttribute('aria-haspopup','dialog');reading.setAttribute('aria-controls','readingDialog');reading.onclick=guard(()=>showReading(row));cells[4].append(reading);const scale=node('input');scale.type='number';scale.min='.25';scale.max='4';scale.step='.05';scale.value=row.duration_scale;scale.disabled=busy;scale.setAttribute('aria-label',`${row.id} 話速`);scale.onchange=guard(async()=>{row.duration_scale=Number(scale.value);Object.assign(row,await saveRow(row));status.textContent=labels[row.status];status.className='status '+row.status});scale.addEventListener('wheel',e=>{if(document.activeElement===scale)e.preventDefault()},{passive:false});cells[5].append(scale);const seed=node('input',undefined,'seed');seed.type='text';seed.placeholder='random';seed.value=row.seed??'';seed.disabled=busy;seed.setAttribute('aria-label',`${row.id} Seed`);seed.onchange=guard(async()=>{if(seed.value!==''&&(!/^\d+$/.test(seed.value)||Number(seed.value)>4294967295))throw Error('Seedは0〜4294967295、または空欄です');row.seed=seed.value===''?null:Number(seed.value);Object.assign(row,await saveRow(row));status.textContent=labels[row.status];status.className='status '+row.status});cells[6].append(seed,node('small','前回: '+(row.used_seed??'—')));const status=node('span',labels[row.status],'status '+row.status);cells[7].append(status);if(row.error)cells[7].append(node('small',row.error));if(row.wav){const audio=node('audio');audio.controls=true;audio.preload='none';audio.src=audioUrl(project.id,row);cells[8].append(audio)}const generate=node('button',row.wav?'再生成':'生成');generate.disabled=busy||!!state.operation;generate.onclick=guard(()=>startGeneration('selected',[row.id]));const exportRow=node('button',undefined,'icon-button export-row');const exportIcon=node('span',undefined,'output-icon');exportIcon.setAttribute('aria-hidden','true');exportRow.append(exportIcon);exportRow.title='この行だけ出力（WAV＋字幕txt）';exportRow.setAttribute('aria-label',`${row.id}行だけ出力（WAV＋字幕txt）`);exportRow.disabled=busy||!!state.operation;exportRow.onclick=()=>exportRows(false,[row.id]);const remove=node('button',undefined,'icon-button delete-row');const deleteIcon=node('span',undefined,'delete-icon');deleteIcon.setAttribute('aria-hidden','true');remove.append(deleteIcon);remove.title='この行を削除';remove.setAttribute('aria-label',`${row.id}行を削除`);remove.disabled=busy;remove.onclick=guard(async()=>{if(busy)return;await saving;playback.stop();await api(`/projects/${project.id}/rows/${row.id}`,{method:'DELETE'});chosen.clear();selectionAnchor=null;project=await api('/projects/'+project.id);renderRows();showExportInfo();message('行を削除しました')});cells[8].append(generate,exportRow,remove);const master=node('select');master.setAttribute('aria-label',`${row.id} マスター`);const defaultOption=node('option','共通マスター');defaultOption.value='';master.append(defaultOption);for(const item of state.settings.masters??[]){const option=node('option',item.name);option.value=item.id;master.append(option)}if(row.master_id&&!(state.settings.masters??[]).some(m=>m.id===row.master_id)){const missing=node('option','未登録のマスター');missing.value=row.master_id;master.append(missing)}master.value=row.master_id??'';master.disabled=busy;master.onchange=guard(async()=>{const previous=row.master_id;row.master_id=master.value||null;try{Object.assign(row,await saveRow(row));status.textContent=labels[row.status];status.className='status '+row.status}catch(e){row.master_id=previous;master.value=previous??'';throw e}});cells[9].append(master);const pause=node('input');pause.type='number';pause.min=0;pause.max=60000;pause.step=50;pause.value=row.pause_ms??0;pause.disabled=busy;pause.setAttribute('aria-label',`${row.id} 末尾無音ms`);pause.onchange=guard(async()=>{const value=Number(pause.value);if(!Number.isInteger(value)||value<0||value>60000)throw Error('末尾無音は0〜60000ミリ秒の整数です');const saved=await saveRow({...row,pause_ms:value});Object.assign(row,saved);playback.stop();const audio=cells[8].querySelector('audio');if(audio)audio.src=audioUrl(project.id,row)});pause.addEventListener('wheel',e=>{if(document.activeElement===pause)e.preventDefault()},{passive:false});cells[10].append(pause);fragment.append(tr)}body.append(fragment);updateSelection();renderPreviewRowOptions()}
 
 function renderPreviewRowOptions(){
   const select=$('ppPreviewRow');const current=select.value;select.replaceChildren();
@@ -58,9 +58,9 @@ function syncProject(next) {
     cells[6].querySelector('small').textContent = '前回: ' + (row.used_seed ?? '—');
     const action = cells[8].querySelector('button');
     action.textContent = row.wav ? '再生成' : '生成';
-    action.disabled = busy;
+    action.disabled = busy||!!state.operation;
     cells[8].querySelector('.delete-row').disabled = busy;
-    cells[8].querySelector('.export-row').disabled = busy;
+    cells[8].querySelector('.export-row').disabled = busy||!!state.operation;
     cells[9].querySelector('select').disabled = busy;
     cells[10].querySelector('input').disabled = busy;
     for (const cell of [cells[2], cells[3], cells[5], cells[6]]) {
@@ -126,9 +126,10 @@ function previewAudioUrl(variant){
 }
 $('ppPlayBefore').onclick=guard(()=>{const audio=$('ppPreviewAudio');audio.src=previewAudioUrl('raw');audio.play()});
 $('ppPlayAfter').onclick=guard(()=>{const audio=$('ppPreviewAudio');audio.src=previewAudioUrl('processed');audio.play()});
-function updateJob(){const j=state.job;busy=j.running;const stopping=(busy&&j.stop_requested)||(exporting&&exportStopping);$('stopGeneration').disabled=!(busy||exporting)||stopping;$('stopGeneration').textContent=stopping?'現在行の完了後に停止…':'中断';if(j.fatal_error)message('生成処理が停止しました: '+j.fatal_error,true);$('progress').max=j.total||1;$('progress').value=j.done;$('progressText').textContent=j.running?`${j.done} / ${j.total} 完了・No.${j.current??'—'} 生成中（初回はモデルをロード）${j.auto_export?`・出力 ${j.exported??0} 件`:''}`:(j.total?`${j.done} / ${j.total} 完了・エラー ${j.errors} 行${j.auto_export?`・出力 ${j.exported??0} 件`:''}`:project?`${project.rows.length} セリフ`:'台本を読み込んでください');for(const id of ['registerMaster','masterName','masterPath','masterFile','generate','applyScale','applyPause','bulkScale','bulkPause','saveSettings','defaultPause','normalizeNumbers','wrapSubtitles','savePostProcessing','ppEnabled','eqEnabled','eqPreset','eqFrequency','eqGain','eqQ','peakEnabled','peakDbfs','ppPreviewRow','ppPlayBefore','ppPlayAfter','saveDictionary','addWord','script','voice','projects','newProject','addRow','addRowAfterSelection','newRowText','export','saveProject','copyProject','projectName','chooseOutput','openProject','autoExport'])$(id).disabled=busy;document.querySelectorAll('#dictionary input,#dictionary button,#masterList button').forEach(e=>e.disabled=busy||e.dataset.inUse==='true');for(const id of ['eqFrequency','eqGain','eqQ'])$(id).disabled=busy||$('eqPreset').value!=='custom';applySharedReadOnly();announceAutoExport(j)}
+function updateJob(){const j=state.job;const op=state.operation??localOperation;const own=op?.project===project?.id;busy=operationPending||!!(own&&op);const stopping=!!(own&&op?.stop_requested)||exportStopping;$('stopGeneration').disabled=!own||!op||stopping;$('stopGeneration').textContent=stopping?'現在行の完了後に停止…':'中断';if(j.fatal_error)message('生成処理が停止しました: '+j.fatal_error,true);$('progress').max=j.total||1;$('progress').value=j.done;$('progressText').textContent=j.running?`${j.done} / ${j.total} 完了・No.${j.current??'—'} 生成中（初回はモデルをロード）${j.auto_export?`・出力 ${j.exported??0} 件`:''}`:(j.total?`${j.done} / ${j.total} 完了・エラー ${j.errors} 行${j.auto_export?`・出力 ${j.exported??0} 件`:''}`:project?`${project.rows.length} セリフ`:'台本を読み込んでください');for(const id of ['registerMaster','masterName','masterPath','masterFile','generate','applyScale','applyPause','bulkScale','bulkPause','saveSettings','defaultPause','normalizeNumbers','wrapSubtitles','savePostProcessing','ppEnabled','eqEnabled','eqPreset','eqFrequency','eqGain','eqQ','peakEnabled','peakDbfs','ppPreviewRow','ppPlayBefore','ppPlayAfter','saveDictionary','addWord','script','voice','projects','newProject','addRow','addRowAfterSelection','newRowText','export','saveProject','copyProject','projectName','chooseOutput','openProject','autoExport'])$(id).disabled=busy;document.querySelectorAll('#dictionary input,#dictionary button,#masterList button').forEach(e=>e.disabled=busy||e.dataset.inUse==='true');for(const id of ['eqFrequency','eqGain','eqQ'])$(id).disabled=busy||$('eqPreset').value!=='custom';for(const id of ['generate','export'])$(id).disabled=busy||!!op;document.querySelectorAll('.export-row').forEach(e=>e.disabled=busy||!!op);if(op&&!own)$('progressText').textContent='別プロジェクトで生成・出力中（このプロジェクトは編集できます）';if(op)for(const id of ['saveSettings','savePostProcessing','saveDictionary','registerMaster','voice'])$(id).disabled=true;applySharedReadOnly();announceAutoExport(j)}
 let autoExportWatch=null;
 let exporting=false,exportStopping=false;
+let operationPending=false,localOperation=null;
 function announceAutoExport(j){
   if(!autoExportWatch||j.job_id!==autoExportWatch||j.running)return;
   autoExportWatch=null;
@@ -138,13 +139,25 @@ function announceAutoExport(j){
 ${j.export_folder}`);
 }
 async function startGeneration(mode,ids){
-  playback.stop();await saving;
-  const auto=autoExportOn();
-  // Auto-export needs a destination before the first row is generated.
-  if(auto&&!$('output').value.trim()&&!await pickOutputFolder()){message('出力先が未設定のため生成を開始しませんでした。自動出力をOFFにすると出力せずに生成できます。',true);return}
-  const started=await api(`/projects/${project.id}/generate`,json('POST',{mode,ids,seed_mode:$('seedMode').value,auto_export:auto,export_folder:auto?$('output').value.trim():''}));
-  if(started.auto_export)autoExportWatch=started.job_id;
-  state=await api('/state');updateJob();syncProject(await api('/projects/'+project.id))
+  if(operationPending||state.operation||localOperation)throw Error('生成・出力が実行中です');
+  if(!project)throw Error('台本を読み込んでください');
+  const pid=project.id, selected=ids?[...ids]:ids;
+  operationPending=true;updateJob();
+  try{
+    playback.stop();await saving;
+    if(project?.id!==pid)throw Error('プロジェクトが切り替わりました');
+    const auto=autoExportOn();
+    if(auto&&!$('output').value.trim()&&!await pickOutputFolder()){message('出力先が未設定のため生成を開始しませんでした。',true);return}
+    if(project?.id!==pid)throw Error('プロジェクトが切り替わりました');
+    const token=crypto.randomUUID();
+    localOperation={id:token,project:pid,kind:'generate'};
+    const options=json('POST',{mode,ids:selected,seed_mode:$('seedMode').value,auto_export:auto,export_folder:auto?$('output').value.trim():''});
+    options.headers={...options.headers,'X-Operation-ID':token};
+    const started=await api(`/projects/${pid}/generate`,options);
+    if(started.auto_export)autoExportWatch=started.job_id;
+    const fresh=await api('/state');state.job=fresh.job;state.operation=fresh.operation;
+    const next=await api('/projects/'+pid);if(project?.id===pid)syncProject(next);
+  }finally{operationPending=false;localOperation=null;updateJob()}
 }
 function autoExportOn(){return $('autoExport').getAttribute('aria-checked')==='true'}
 function renderAutoExport(on){$('autoExport').setAttribute('aria-checked',String(on));$('autoExport').querySelector('.switch-text').textContent=on?'ON':'OFF';try{localStorage.setItem('autoExport',on?'1':'0')}catch{}}
@@ -199,8 +212,6 @@ function showExportInfo() {
     exportError = '';
     $('output').value = project.output_folder ?? localStorage.getItem('output:' + project.id) ?? '';
   }
-  const pending = project.rows.filter(r => r.status !== 'generated');
-  const last = project.last_export || localStorage.getItem('export:' + project.id);
   const lines = [];
 
 
@@ -224,9 +235,12 @@ $('output').addEventListener('input', () => {
   if (project) localStorage.setItem('output:' + project.id, $('output').value);
 });
 async function exportRows(selectedOnly, explicitIds = null) {
+  if(operationPending||state.operation||localOperation){message('生成・出力が実行中です',true);return}
+  operationPending=true;
   try {
     if (!project) throw Error('台本を読み込んでください');
     if (busy) throw Error('生成中です。完了後に出力してください');
+    updateJob();
     const pid = project.id;
     const exportingProject = project;
     const ids = explicitIds ? [...explicitIds] : selectedOnly ? [...chosen] : null;
@@ -236,11 +250,15 @@ async function exportRows(selectedOnly, explicitIds = null) {
     if (!$('output').value.trim() && !await pickOutputFolder()) return;
     if (project?.id !== pid) throw Error('プロジェクトが切り替わりました。もう一度出力してください');
     localStorage.setItem('output:' + project.id, $('output').value);
+    const token=crypto.randomUUID();
+    localOperation={id:token,project:pid,kind:'export'};
     exporting = true; exportStopping = false; updateJob();
     let result;
     try {
-      result = await api(`/projects/${project.id}/export`, json('POST', {folder: $('output').value, ids}));
-    } finally { exporting = false; exportStopping = false; updateJob(); }
+      const options=json('POST', {folder: $('output').value, ids});
+      options.headers={...options.headers,'X-Operation-ID':token};
+      result = await api(`/projects/${pid}/export`, options);
+    } finally { exporting = false; exportStopping = false; if(state.operation?.id===token)state.operation=null; }
     localStorage.setItem('export:' + pid, result.folder);exportingProject.last_export=result.folder;exportingProject.output_folder=result.folder;
     exportError = '';
     showExportInfo();
@@ -249,11 +267,26 @@ async function exportRows(selectedOnly, explicitIds = null) {
     exportError = e.message;
     showExportInfo();
     message(e.message, true);
-  }
+  } finally {operationPending=false;localOperation=null;updateJob()}
 };
-setInterval(showExportInfo, 1000);
+
 guard(async()=>{state=await api('/state');renderState();const last=localStorage.getItem('project');if(state.projects.some(p=>p.id===last)){const opened=await api(`/projects/${last}/open-saved`,json('POST',{}));await loadProject(opened.id);renderState();}updateJob()})();
-setInterval(guard(async()=>{if(pollBusy||movingRows)return;pollBusy=true;try{const wasBusy=busy;const fresh=await api('/state');if(movingRows)return;state.job=fresh.job;syncSharedLibrary(fresh);updateJob();if(project&&(busy||wasBusy)){syncProject(await api('/projects/'+project.id));playback.refresh()}}finally{pollBusy=false}}),1800);
+async function pollState(){
+  if(pollBusy||movingRows)return;
+  pollBusy=true;
+  try{
+    const wasBusy=busy,previousJob=JSON.stringify(state.job);
+    const fresh=await api('/state?light=true&library_revision='+(state.shared_revision??-1));
+    if(movingRows)return;
+    state.job=fresh.job;state.operation=fresh.operation;
+    syncSharedLibrary(fresh);updateJob();
+    if(project&&(busy||wasBusy)&&(wasBusy!==busy||previousJob!==JSON.stringify(fresh.job))){
+      const pid=project.id,updated=await api('/projects/'+pid);
+      if(project?.id===pid){syncProject(updated);playback.refresh()}
+    }
+  }finally{pollBusy=false;}
+}
+setInterval(guard(pollState),1800);
 
 async function persistProject(copyProject) {
   if (!project) throw Error('台本を読み込んでください');
@@ -294,6 +327,7 @@ $('openProject').onclick = guard(async () => {
 
 function chooseTarget(title, allLabel, selectedLabel, allNote = '') {
   const dialog = $('exportChoice'), count = chosen.size;
+  if(dialog.open)return Promise.resolve(null);
   $('exportChoiceTitle').textContent = title;
   $('exportAll').textContent = allLabel;
   $('exportSelected').textContent = selectedLabel;
@@ -333,13 +367,16 @@ playback.resolve = item => {
   return row.status==='generated'&&row.wav?{id:row.id,url:audioUrl(project.id,row)}:false;
 };
 $('stopGeneration').onclick=guard(async()=>{
-  if(!project)return;
-  if(exporting)exportStopping=true;
-  updateJob();
-  const reply=await api(`/projects/${project.id}/stop-generation`,json('POST',{}));
-  if('running' in reply)state.job=reply;
-  updateJob();
-  message('現在の行が完了したら停止します');
+  const op=state.operation??localOperation;
+  if(!project||!op||op.project!==project.id)return;
+  exportStopping=true;updateJob();
+  try{
+    const options=json('POST',{});options.headers={...options.headers,'X-Operation-ID':op.id};
+    const reply=await api(`/projects/${op.project}/stop-generation`,options);
+    if(state.operation?.id===op.id)state.operation=reply.operation;
+    if(localOperation?.id===op.id)localOperation=reply.operation;
+    message('現在の行が完了したら停止します');
+  }finally{exportStopping=false;updateJob()}
 });
 async function togglePlayback() {
   await saving;
@@ -473,9 +510,9 @@ $('registerMaster').onclick=guard(async()=>{
   await saving;
   const name=$('masterName').value.trim();
   if(!name)throw Error('マスター名を入力してください');
-  const file=null;
-  if(file){const data=new FormData();data.append('name',name);data.append('file',file);state.settings=await api('/masters/upload',{method:'POST',body:data})}
-  else{const reference=$('masterPath').value.trim()||state.settings.reference;if(!reference)throw Error('WAVファイルか絶対パスを指定してください');state.settings=await api('/masters',json('POST',{name,reference}))}
+  const reference=$('masterPath').value.trim()||state.settings.reference;
+  if(!reference)throw Error('WAVファイルか絶対パスを指定してください');
+  state.settings=await api('/masters',json('POST',{name,reference}));
   $('masterName').value='';$('masterPath').value='';$('masterFile').value='';
   renderState();if(project)renderRows();message('マスターを登録しました');
 });
@@ -515,7 +552,7 @@ setInterval(guard(async()=>{
   saveStatusPolling=true;
   try{
     await saving;const pid=project.id;
-    const fresh=await api('/projects/'+pid);
+    const fresh=await api('/projects/'+pid+'/save-status');
     if(project?.id!==pid)return;
     project.dirty=fresh.dirty||localProjectEdits;project.autosave=fresh.autosave;updateSaveStatus();
     if(project.autosave&&project.dirty)await persistProject(false);

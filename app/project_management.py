@@ -7,9 +7,17 @@ import uuid
 from pathlib import Path
 
 
-def store_voice(data, source):
+def file_digest(source):
+    with Path(source).open('rb') as stream:
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+        return digest.hexdigest()
+
+
+def store_voice(data, source, digest=None):
     source = Path(source)
-    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    digest = digest or file_digest(source)
     folder = data / 'voices' / 'shared'
     folder.mkdir(parents=True, exist_ok=True)
     target = folder / (digest + '.wav')

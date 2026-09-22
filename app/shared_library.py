@@ -28,4 +28,16 @@ def read_library(root):
         for e in dictionary
     ):
         raise ValueError('共有辞書の形式が不正です')
-    return masters, dictionary
+    return masters, [{**entry, 'enabled': entry.get('enabled', True)} for entry in dictionary]
+
+
+def library_signature(root):
+    """Stat on each check; parse only after changes. Missing settings must fail closed."""
+    root = Path(root).resolve()
+    settings = (root / 'settings.json').stat()
+    try:
+        dictionary = (root / 'dictionaries/reading.json').stat()
+    except FileNotFoundError:
+        dictionary = None
+    return (str(root), settings.st_mtime_ns, settings.st_ctime_ns, settings.st_size,
+            None if dictionary is None else (dictionary.st_mtime_ns, dictionary.st_ctime_ns, dictionary.st_size))

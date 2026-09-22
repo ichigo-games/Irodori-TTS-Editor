@@ -162,7 +162,7 @@ class EditorTests(unittest.TestCase):
         try:
             self.c.post(f'/api/projects/{pid}/generate', json={'mode': 'all'})
             self.assertTrue(entered.wait(2))
-            response = self.c.post(f'/api/projects/{pid}/stop-generation')
+            response = self.c.post(f'/api/projects/{pid}/stop-generation', headers={'X-Operation-ID': m.operations.snapshot()['id']})
             self.assertTrue(response.json()['stop_requested'])
             self.assertTrue(m.job['running'])
         finally:
@@ -230,7 +230,7 @@ class EditorTests(unittest.TestCase):
         for ids, before in [([1, 3], None), ([1, 1], None), ([99], None), ([1], 99)]:
             self.assertEqual(self.c.post(f'/api/projects/{pid}/move-rows',
                              json={'ids': ids, 'before_id': before}).status_code, 400)
-        m.job['running'] = True
+        m.job.update(running=True, project=pid)
         try:
             self.assertEqual(self.c.post(f'/api/projects/{pid}/move-rows',
                              json={'ids': [1], 'before_id': None}).status_code, 409)
@@ -685,6 +685,7 @@ class EditorTests(unittest.TestCase):
         self.assertEqual([p.name[:3] for p in folder.glob('*.wav')], ['001'])
 
     def test_stop_endpoint_does_not_wait_for_a_running_export(self):
+        operation = m.operations.begin('0' * 32, 'export')
         holder_ready, release = threading.Event(), threading.Event()
         def hold_lock():
             with m.lock:  # an export holds the lock for its whole run
@@ -696,11 +697,12 @@ class EditorTests(unittest.TestCase):
             self.assertTrue(holder_ready.wait(2))
             m.stop_event.clear()
             started = time.monotonic()
-            response = self.c.post('/api/projects/' + '0' * 32 + '/stop-generation')
+            response = self.c.post('/api/projects/' + '0' * 32 + '/stop-generation', headers={'X-Operation-ID': operation['id']})
             elapsed = time.monotonic() - started
         finally:
             release.set()
             holder.join()
+            m.operations.finish(operation['id'])
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()['stop_requested'])
         self.assertTrue(m.stop_event.is_set())

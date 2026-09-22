@@ -15,7 +15,7 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, UploadFile, Form
+from fastapi import FastAPI, HTTPException, UploadFile, Form, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -23,8 +23,9 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.concurrency import run_in_threadpool
 
 from app import working_sessions
-from app.shared_library import read_library, PREFIX as SHARED_PREFIX
-from app.project_management import store_voice, migrate_references, move_project
+from app.operations import Operations
+from app.shared_library import read_library, library_signature, PREFIX as SHARED_PREFIX
+from app.project_management import store_voice, file_digest, migrate_references, move_project
 from app.tts import IrodoriEngine
 from app.audio_output import output_audio
 from app.post_processing import process_audio
@@ -137,8 +138,9 @@ DEFAULT_POST_PROCESSING = {
 
 lock = threading.RLock()
 # Set by the 中断 button. Checked between rows by both generation jobs and manual exports
-# (an export holds `lock` for its whole run, so this flag must not need the lock).
+# Cancellation must not wait for file processing under the data lock.
 stop_event = threading.Event()
+operations = Operations(stop_event)
 engine = IrodoriEngine()
 settings = read_json(DATA / 'settings.json', {'reference': '', 'duration_scale': 0.85})
 settings.setdefault('normalize_numbers', True)
@@ -152,12 +154,26 @@ app = FastAPI(title='Irodori TTS Editor')
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=['127.0.0.1', 'localhost', 'testserver'])
 
 
-def refresh_shared_library():
+shared_signature = None
+shared_revision = 0
+
+
+def refresh_shared_library(for_admission=False):
+    global shared_signature, shared_revision
     with lock:
-        if SHARED_DATA and not job['running']:
+        if SHARED_DATA and not job['running'] and (for_admission or operations.snapshot() is None):
+            signature = library_signature(SHARED_DATA)
+            if signature == shared_signature:
+                return
             masters, entries = read_library(SHARED_DATA)
-            settings['masters'] = [m for m in settings['masters'] if not m.get('shared')] + masters
+            merged = [m for m in settings['masters'] if not m.get('shared')] + masters
+            changed = settings['masters'] != merged or dictionary != entries
+            settings['masters'] = merged
             dictionary[:] = entries
+            if changed:
+                invalidate_reference()
+            shared_signature = signature
+            shared_revision += 1
 
 
 def require_local_library(mid=None):
@@ -167,13 +183,25 @@ def require_local_library(mid=None):
 
 @app.middleware('http')
 async def shared_library_view(request, call_next):
+    from fastapi.responses import JSONResponse
+    match = re.fullmatch(r'/api/projects/([a-f0-9]{32})/(generate|export)', request.url.path)
+    admitted = None
     try:
-        if SHARED_DATA:
-            await run_in_threadpool(refresh_shared_library)
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        from fastapi.responses import JSONResponse
-        return JSONResponse({'detail': f'通常版の共有データを読み込めません: {exc}'}, status_code=503)
-    return await call_next(request)
+        # Reserve before shared refresh or any potentially blocking data access.
+        if request.method == 'POST' and match:
+            admitted = operations.begin(match[1], match[2], request.headers.get('X-Operation-ID'))
+            request.state.operation = admitted
+        if SHARED_DATA and request.url.path.startswith('/api/') and not request.url.path.endswith('/stop-generation'):
+            try:
+                await run_in_threadpool(refresh_shared_library, bool(admitted))
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                return JSONResponse({'detail': f'通常版の共有データを読み込めません: {exc}'}, status_code=503)
+        return await call_next(request)
+    except HTTPException as exc:
+        return JSONResponse({'detail': exc.detail}, status_code=exc.status_code)
+    finally:
+        if admitted and not admitted['handed_off']:
+            operations.finish(admitted['id'])
 
 
 @app.middleware('http')
@@ -195,27 +223,35 @@ def project_path(pid):
 
 
 
-def load_project(pid):
-    p = read_json(project_path(pid), {})
+def load_project(pid, previews=False):
+    path = project_path(pid)
+    p = read_json(path, {})
+    preview_texts = {}
     changed = False
     for row in p['rows']:
-        if row['status'] == 'generated' and (row.get('effective_text') != prepare_text(row['speech_text']) or row.get('reference') != resolve_reference(row)):
+        if previews or row['status'] == 'generated':
+            preview_texts[row['id']] = prepare_text(row['speech_text'])
+        if row['status'] == 'generated' and (row.get('effective_text') != preview_texts[row['id']] or row.get('reference') != resolve_reference(row)):
             row['status'] = 'stale'
             changed = True
         if (row['status'] == 'generating' and not job['running']) or (
-            row['status'] == 'generated' and not (project_path(pid).parent / row['wav']).is_file()
+            row['status'] == 'generated' and not (path.parent / row['wav']).is_file()
         ):
             row['status'] = 'error'
             row['error'] = '前回の生成が中断されたか、音声が見つかりません。再生成してください。'
             changed = True
     if changed:
-        atomic_json(project_path(pid), p)
+        atomic_json(path, p)
+    if previews:
+        for row in p['rows']:
+            row['preview'] = preview_texts[row['id']]
     return p
 
 
-def idle():
-    if job['running']:
-        raise HTTPException(409, '生成中です。完了後に編集してください。')
+def idle(pid=None):
+    active = operations.snapshot()
+    if (job['running'] and (pid is None or job['project'] == pid)) or (active and (pid is None or active['project'] == pid)):
+        raise HTTPException(409, '生成・出力中です。完了後に編集してください。')
 
 
 def prepare_text(text, entries=None):
@@ -231,12 +267,19 @@ def resolve_reference(row):
 
 
 def invalidate_reference(reference=None):
+    """Persist only projects whose generated audio actually became stale."""
     for path in working_sessions.ROOT.glob('*/project.json'):
         p = read_json(path, {})
+        changed = False
         for row in p['rows']:
-            if row['status'] == 'generated' and row.get('reference') != resolve_reference(row):
+            if row['status'] == 'generated' and (
+                row.get('reference') != resolve_reference(row)
+                or row.get('effective_text') != prepare_text(row['speech_text'])
+            ):
                 row['status'] = 'stale'
-        atomic_json(path, p)
+                changed = True
+        if changed:
+            atomic_json(path, p)
 
 
 class Settings(BaseModel):
@@ -262,8 +305,11 @@ class PostProcessingSettings(BaseModel):
 @app.put('/api/settings/post_processing')
 def save_post_processing(value: PostProcessingSettings):
     with lock:
-        settings['post_processing'] = value.model_dump()
-        atomic_json(DATA / 'settings.json', settings)
+        idle()
+        updated = value.model_dump()
+        if settings['post_processing'] != updated:
+            settings['post_processing'] = updated
+            atomic_json(DATA / 'settings.json', settings)
         return settings
 
 
@@ -310,20 +356,31 @@ def upload_master(file: UploadFile, name: str = Form(...)):
         return settings
 
 
-def master_usage(master):
-    projects = []
+def master_usage_index():
+    usage = {}
     for path in list((DATA / 'projects').glob('*/project.json')) + list((DATA / 'trash').glob('*/project.json')) + list(working_sessions.ROOT.glob('*/project.json')):
         p = read_json(path, {})
-        count = sum(r.get('master_id') == master['id'] for r in p.get('rows', []))
-        if count:
-            projects.append({'name': p.get('name', path.parent.name), 'count': count})
-    return {'projects': projects, 'common': settings.get('reference') == master['reference']}
+        counts = {}
+        for row in p.get('rows', []):
+            mid = row.get('master_id')
+            if mid:
+                counts[mid] = counts.get(mid, 0) + 1
+        for mid, count in counts.items():
+            usage.setdefault(mid, []).append({'name': p.get('name', path.parent.name), 'count': count})
+    return usage
+
+
+def master_usage(master, usage=None):
+    if usage is None:
+        usage = master_usage_index()
+    return {'projects': usage.get(master['id'], []), 'common': settings.get('reference') == master['reference']}
 
 
 @app.get('/api/masters')
 def list_masters():
     with lock:
-        return [{**m, **master_usage(m), 'exists': Path(m['reference']).is_file()} for m in settings['masters']]
+        usage = master_usage_index()
+        return [{**m, **master_usage(m, usage), 'exists': Path(m['reference']).is_file()} for m in settings['masters']]
 
 
 class MasterName(BaseModel):
@@ -462,16 +519,20 @@ def open_project_file():
     if not selected:
         return {'cancelled': True}
     with lock:
-        idle()
         pid = uuid.uuid4().hex
         folder = working_sessions.directory(pid)
         try:
             p = read_project_file(selected, folder, lambda row: RowEdit.model_validate(row))
-            for master in p.pop('masters', []):
+            imported = p.pop('masters', [])
+            by_digest = {}
+            if imported:
+                for registered in settings['masters']:
+                    if Path(registered['reference']).is_file():
+                        by_digest.setdefault(file_digest(registered['reference']), []).append(registered)
+            for master in imported:
                 old_id, old_ref = master['id'], master.pop('original_reference')
-                digest = hashlib.sha256(Path(master['reference']).read_bytes()).digest()
-                matches = [m for m in settings['masters'] if Path(m['reference']).is_file()
-                           and hashlib.sha256(Path(m['reference']).read_bytes()).digest() == digest]
+                digest = file_digest(master['reference'])
+                matches = by_digest.get(digest, [])
                 existing = next((m for m in matches if m['id'] == old_id), None)
                 existing = existing or next((m for m in matches if m['name'] == master['name']), None)
                 existing = existing or next(iter(matches), None)
@@ -485,9 +546,10 @@ def open_project_file():
                     while any(m['name'].casefold() == name.casefold() for m in settings['masters']):
                         name = f'{base} ({n})'
                         n += 1
-                    reference = store_voice(DATA, master['reference'])
+                    reference = store_voice(DATA, master['reference'], digest=digest)
                     settings['masters'].append(dict(id=mid, name=name, reference=reference,
                                                    original_name=master.get('original_name')))
+                    by_digest.setdefault(digest, []).append(settings['masters'][-1])
                 for row in p['rows']:
                     if row.get('master_id') == old_id:
                         row['master_id'] = mid
@@ -506,7 +568,7 @@ def save_project(pid: str, value: ProjectSave):
     selected = None
     if value.native_dialog:
         with lock:
-            idle()
+            idle(pid)
             existing = load_project(pid).get('project_file', '')
         selected = choose_path('save', '名前を付けてプロジェクトを保存',
                                str(Path(existing).parent) if existing else '',
@@ -514,7 +576,7 @@ def save_project(pid: str, value: ProjectSave):
         if not selected:
             return {'cancelled': True}
     with lock:
-        idle()
+        idle(pid)
         p = load_project(pid)
         if not value.name.strip():
             raise HTTPException(400, 'プロジェクト名を入力してください')
@@ -561,7 +623,7 @@ def save_project(pid: str, value: ProjectSave):
         p['catalog_id'] = catalog
         source_folder = project_path(p['id']).parent
         destination = DATA / 'projects' / catalog
-        shutil.copytree(source_folder, destination, dirs_exist_ok=True)
+        working_sessions.copy_snapshot(source_folder, destination, p)
         snapshot = copy.deepcopy(p)
         snapshot.update(id=catalog, autosave=False)
         atomic_json(destination / 'project.json', snapshot)
@@ -576,7 +638,7 @@ class AutosaveOption(BaseModel):
 @app.put('/api/projects/{pid}/autosave')
 def set_autosave(pid: str, value: AutosaveOption):
     with lock:
-        idle()
+        idle(pid)
         p = load_project(pid)
         if value.enabled and not p.get('project_file'):
             raise HTTPException(400, '先にプロジェクトを保存してください')
@@ -588,7 +650,7 @@ def set_autosave(pid: str, value: AutosaveOption):
 @app.post('/api/projects/{pid}/open-saved')
 def open_saved_project(pid: str):
     with lock:
-        idle()
+        idle(pid)
         if not re.fullmatch(r'[a-f0-9]{32}', pid):
             raise HTTPException(404, 'プロジェクトがありません')
         source = DATA / 'projects' / pid
@@ -606,7 +668,7 @@ def open_saved_project(pid: str):
 @app.post('/api/projects/{pid}/close')
 def close_working_project(pid: str):
     with lock:
-        idle()
+        idle(pid)
         working_sessions.discard(pid)
         return {'closed': pid}
 
@@ -640,7 +702,7 @@ def project_management():
 @app.post('/api/projects/{pid}/trash')
 def trash_project(pid: str):
     with lock:
-        idle()
+        idle(pid)
         try:
             migrate_references(DATA, settings, atomic_json)
             move_project(DATA, pid)
@@ -652,7 +714,7 @@ def trash_project(pid: str):
 @app.post('/api/projects/{pid}/restore')
 def restore_project(pid: str):
     with lock:
-        idle()
+        idle(pid)
         try:
             move_project(DATA, pid, restore=True)
         except (ValueError, OSError) as exc:
@@ -661,12 +723,17 @@ def restore_project(pid: str):
 
 
 @app.get('/api/state')
-def state():
+def state(light: bool = False, library_revision: int = -1):
     with lock:
+        if light:
+            return {'job': copy.deepcopy(job), 'operation': operations.snapshot(),
+                    'shared_library': bool(SHARED_DATA), 'shared_revision': shared_revision,
+                    **({'settings': settings, 'dictionary': dictionary}
+                       if SHARED_DATA and library_revision != shared_revision else {})}
         # Newest first, using the same "updated" time as the project management list.
         found = sorted(((path.stat().st_mtime, read_json(path, {})) for path in (DATA / 'projects').glob('*/project.json')),
                        key=lambda item: item[0], reverse=True)
-        return {'settings': settings, 'dictionary': dictionary, 'shared_library': bool(SHARED_DATA), 'job': copy.deepcopy(job),
+        return {'settings': settings, 'dictionary': dictionary, 'shared_library': bool(SHARED_DATA), 'shared_revision': shared_revision, 'operation': operations.snapshot(), 'job': copy.deepcopy(job),
                 'projects': [{'id': p['id'], 'name': p['name']} for _, p in found]}
 
 
@@ -676,11 +743,15 @@ def save_settings(value: Settings):
         idle()
         if value.reference and not Path(value.reference).is_file():
             raise HTTPException(400, 'Reference Audioが見つかりません')
+        previous = (settings.get('reference'), settings.get('normalize_numbers'))
         if value.reference != settings.get('reference'):
             settings.pop('reference_original_name', None)
-        settings.update(value.model_dump(exclude={'default_pause_ms'} if 'default_pause_ms' not in value.model_fields_set else set()))
-        atomic_json(DATA / 'settings.json', settings)
-        invalidate_reference(settings['reference'])
+        updated = value.model_dump(exclude={'default_pause_ms'} if 'default_pause_ms' not in value.model_fields_set else set())
+        if any(settings.get(key) != val for key, val in updated.items()):
+            settings.update(updated)
+            atomic_json(DATA / 'settings.json', settings)
+        if previous != (settings.get('reference'), settings.get('normalize_numbers')):
+            invalidate_reference()
         return settings
 
 
@@ -707,21 +778,17 @@ def save_dictionary(entries: list[Entry]):
         idle()
         if len({e.word for e in entries}) != len(entries):
             raise HTTPException(400, '辞書の表記が重複しています')
-        dictionary[:] = [e.model_dump() for e in entries]
-        atomic_json(DATA / 'dictionaries' / 'reading.json', dictionary)
-        for path in working_sessions.ROOT.glob('*/project.json'):
-            p = read_json(path, {})
-            for row in p['rows']:
-                if row['status'] == 'generated' and row.get('effective_text') != prepare_text(row['speech_text']):
-                    row['status'] = 'stale'
-            atomic_json(path, p)
+        updated = [e.model_dump() for e in entries]
+        if updated != dictionary:
+            dictionary[:] = updated
+            atomic_json(DATA / 'dictionaries' / 'reading.json', dictionary)
+            invalidate_reference()
         return dictionary
 
 
 @app.post('/api/projects')
 def create_project(file: UploadFile):
     with lock:
-        idle()
         data = file.file.read()
         lines = decode_csv_script(data) if (file.filename or '').lower().endswith('.csv') else [(source, text, None, settings['default_pause_ms']) for source, text in decode_script(data)]
         if not lines:
@@ -741,7 +808,6 @@ def create_project(file: UploadFile):
 @app.post('/api/projects/new')
 def new_project():
     with lock:
-        idle()
         pid = uuid.uuid4().hex
         folder = working_sessions.directory(pid)
         (folder / 'audio').mkdir(parents=True)
@@ -758,7 +824,7 @@ class AddRows(BaseModel):
 @app.post('/api/projects/{pid}/rows')
 def add_row(pid: str, value: AddRows):
     with lock:
-        idle()
+        idle(pid)
         lines = [line.strip() for line in value.text.splitlines() if line.strip()]
         if not lines:
             raise HTTPException(400, '追加するセリフを入力してください')
@@ -783,16 +849,20 @@ def add_row(pid: str, value: AddRows):
 @app.get('/api/projects/{pid}')
 def get_project(pid: str):
     with lock:
-        p = load_project(pid)
-        for row in p['rows']:
-            row['preview'] = prepare_text(row['speech_text'])
-        return p
+        return load_project(pid, previews=True)
+
+
+@app.get('/api/projects/{pid}/save-status')
+def project_save_status(pid: str):
+    with lock:
+        p = read_json(project_path(pid), {})
+        return {'dirty': p.get('dirty', False), 'autosave': p.get('autosave', False)}
 
 
 @app.put('/api/projects/{pid}/rows/{rid}')
 def edit_row(pid: str, rid: int, value: RowEdit):
     with lock:
-        idle()
+        idle(pid)
         p = load_project(pid)
         row = next((r for r in p['rows'] if r['id'] == rid), None)
         if row is None:
@@ -813,7 +883,7 @@ def edit_row(pid: str, rid: int, value: RowEdit):
 @app.delete('/api/projects/{pid}/rows/{rid}')
 def delete_row(pid: str, rid: int):
     with lock:
-        idle()
+        idle(pid)
         p = load_project(pid)
         if not any(r['id'] == rid for r in p['rows']):
             raise HTTPException(404, '行がありません')
@@ -833,7 +903,7 @@ class MoveRows(BaseModel):
 @app.post('/api/projects/{pid}/move-rows')
 def move_rows(pid: str, value: MoveRows):
     with lock:
-        idle()
+        idle(pid)
         p = load_project(pid)
         rows = p['rows']
         ids = set(value.ids)
@@ -859,7 +929,7 @@ def move_rows(pid: str, value: MoveRows):
         return {'project': p, 'selected': selected}
 
 
-def run_job(pid, ids, seed_mode, reference, entries, normalize_numeric=True, export_folder=None):
+def run_job(pid, ids, seed_mode, reference, entries, normalize_numeric=True, export_folder=None, operation_id=None):
     last_export_at = None
     try:
         for rid in ids:
@@ -929,12 +999,13 @@ def run_job(pid, ids, seed_mode, reference, entries, normalize_numeric=True, exp
         with lock:
             job['running'] = False
             job['current'] = None
+        if operation_id:
+            operations.finish(operation_id)
 
 
 @app.post('/api/projects/{pid}/generate')
-def generate(pid: str, value: Generate):
+def generate(pid: str, value: Generate, request: Request):
     with lock:
-        idle()
         p = load_project(pid)
         if value.mode not in ('missing', 'all', 'selected') or value.seed_mode not in ('configured', 'random', 'previous'):
             raise HTTPException(400, '生成モードが不正です')
@@ -948,27 +1019,24 @@ def generate(pid: str, value: Generate):
         if invalid:
             raise HTTPException(400, 'マスター音声が見つかりません。行: ' + ', '.join(invalid))
         export_folder = resolve_export_folder(value.export_folder) if value.auto_export else None
-        stop_event.clear()
         job.update(running=True, done=0, total=len(ids), errors=0, project=pid, fatal_error=None, stop_requested=False, ids=ids, completed_ids=[],
-                   job_id=uuid.uuid4().hex, auto_export=value.auto_export, export_folder=str(export_folder) if export_folder else None,
+                   job_id=request.state.operation['id'], auto_export=value.auto_export, export_folder=str(export_folder) if export_folder else None,
                    exported=0, export_errors=0, export_error=None)
-        threading.Thread(target=run_job, args=(pid, ids, value.seed_mode, references, copy.deepcopy(dictionary), settings['normalize_numbers'], export_folder), daemon=True).start()
+        request.state.operation['handed_off'] = True
+        try:
+            threading.Thread(target=run_job, args=(pid, ids, value.seed_mode, references, copy.deepcopy(dictionary), settings['normalize_numbers'], export_folder, request.state.operation['id']), daemon=True).start()
+        except Exception:
+            request.state.operation['handed_off'] = False
+            job['running'] = False
+            raise
         return copy.deepcopy(job)
 
 
 @app.post('/api/projects/{pid}/stop-generation')
-def stop_generation(pid: str):
-    """中断: stop generation or a manual export after the row/file currently being processed."""
-    stop_event.set()
-    # A running export holds `lock` until it ends, so only wait for it briefly.
-    if lock.acquire(timeout=1.0):
-        try:
-            if job['running'] and job['project'] == pid:
-                job['stop_requested'] = True
-            return copy.deepcopy(job)
-        finally:
-            lock.release()
-    return dict(job, stop_requested=True)
+def stop_generation(pid: str, request: Request):
+    operation = operations.stop(pid, request.headers.get('X-Operation-ID'))
+    # Keep the response shape; cancellation itself needs no data lock.
+    return {**dict(job), 'stop_requested': True, 'operation': operation}
 
 
 def resolve_audio_source(pid, row, variant='auto'):
@@ -1013,7 +1081,7 @@ def resolve_export_folder(raw):
 
 
 def write_export_files(pid, p, rows, folder, stop=None):
-    """Publish a WAV + subtitle pair per row (subtitle first, WAV last). Caller holds `lock`.
+    """Publish each pair under the data lock, releasing it during spacing.
 
     Returns the stems actually published; fewer than `rows` when `stop` was set meanwhile.
     """
@@ -1032,9 +1100,10 @@ def write_export_files(pid, p, rows, folder, stop=None):
                 time.sleep(1.0)
             if stop is not None and stop.is_set():
                 break
-            subtitle = format_subtitle(row['subtitle_text']) if settings['wrap_subtitles'] else row['subtitle_text']
-            source = output_audio(resolve_audio_source(pid, row, 'auto'), row.get('pause_ms', 0))
-            publish_export_pair(source, folder, stem, subtitle)
+            with lock:
+                subtitle = format_subtitle(row['subtitle_text']) if settings['wrap_subtitles'] else row['subtitle_text']
+                source = output_audio(resolve_audio_source(pid, row, 'auto'), row.get('pause_ms', 0))
+                publish_export_pair(source, folder, stem, subtitle)
             published += 1
         stems = stems[:published]
     except OSError as exc:
@@ -1045,7 +1114,6 @@ def write_export_files(pid, p, rows, folder, stop=None):
 @app.post('/api/projects/{pid}/export')
 def export(pid: str, value: Export):
     with lock:
-        idle()
         p = load_project(pid)
         rows = p['rows']
         if not rows:
@@ -1057,8 +1125,9 @@ def export(pid: str, value: Export):
         if any(r['status'] != 'generated' for r in rows):
             raise HTTPException(400, '出力対象の未生成・変更あり・エラー行を生成してから出力してください')
         folder = resolve_export_folder(value.folder)
-        stop_event.clear()
-        stems = write_export_files(pid, p, rows, folder, stop_event)
+    stems = write_export_files(pid, p, rows, folder, stop_event)
+    with lock:
+        p = load_project(pid)
         p.update(output_folder=str(folder), last_export=str(folder))
         atomic_json(project_path(pid), p)
         return {'folder': str(folder), 'count': len(stems), 'files': [stem + '.wav' for stem in stems],

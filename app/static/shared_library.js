@@ -10,6 +10,8 @@ function applySharedReadOnly(){
 
 function syncSharedLibrary(fresh){
   if(!fresh.shared_library)return;
+  state.shared_revision=fresh.shared_revision;
+  if(!fresh.settings||!fresh.dictionary)return;
   state.shared_library=true;
   if(JSON.stringify(state.dictionary)!==JSON.stringify(fresh.dictionary)){
     state.dictionary=fresh.dictionary;
